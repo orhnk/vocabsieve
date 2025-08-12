@@ -1,7 +1,7 @@
 import os
 import sqlite3
 from datetime import datetime as dt
-from PyQt5.QtWidgets import QLabel
+from PyQt5.QtWidgets import QLabel, QMessageBox, QFileDialog
 from slpp import slpp
 from typing import TYPE_CHECKING
 from .GenericImporter import GenericImporter
@@ -37,10 +37,41 @@ def getBookMetadata(path):
 class KoreaderVocabImporter(GenericImporter):
     def __init__(self, parent: "MainWindow", path):
         self.splitter = parent.splitter
+        self.main_path = path
+        self.sdcard_path = None
+        
+        # Ask if user has an SD card
+        reply = QMessageBox.question(
+            parent, 
+            "SD Card Detection", 
+            "Are you using an SD card with additional books?\n\n"
+            "Note: The main partition contains the vocabulary database (.koreader folder), "
+            "while the SD card may contain additional books.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            sdcard_path = QFileDialog.getExistingDirectory(
+                parent,
+                "Select SD Card Partition (with additional books)",
+                ""
+            )
+            if sdcard_path:
+                self.sdcard_path = sdcard_path
+        
         super().__init__(parent, "KOReader vocab builder", path, "koreader-vocab")
 
     def getNotes(self):
-        bookfiles = koreader_scandir(self.path)
+        # Scan books from main partition
+        bookfiles = koreader_scandir(self.main_path)
+        
+        # Scan books from SD card if available
+        if self.sdcard_path:
+            sdcard_bookfiles = koreader_scandir(self.sdcard_path)
+            bookfiles.extend(sdcard_bookfiles)
+            logger.debug(f"Found {len(sdcard_bookfiles)} additional books on SD card")
+        
         langcode = settings.value("target_language", "en")
         metadata = []
         for bookfile in bookfiles:
@@ -50,7 +81,9 @@ class KoreaderVocabImporter(GenericImporter):
         logger.debug(f"Books in language {langcode}: {books_in_lang}")
         logger.debug(
             f"Other books have been skipped. They are {', '.join([book[1] for book in metadata if not book[0].startswith(langcode)])}")
-        self.dbpath = findDBpath(self.path)
+        
+        # Vocab database is always on main partition
+        self.dbpath = findDBpath(self.main_path)
         logger.debug("KOReader vocab db path: " + self.dbpath)
         con = sqlite3.connect(self.dbpath)
         cur = con.cursor()
@@ -90,7 +123,7 @@ class KoreaderVocabImporter(GenericImporter):
         self._layout.addRow(QLabel(f"Found {count} notes in Vocabulary Builder in language '{langcode}'"))
 
         try:
-            self.histpath = findHistoryPath(self.path)
+            self.histpath = findHistoryPath(self.main_path)
             logger.debug("KOReader history path: " + self.histpath)
             d = []
             with open(self.histpath, encoding="utf-8") as f:
@@ -104,8 +137,17 @@ class KoreaderVocabImporter(GenericImporter):
             self._layout.addRow(
                 QLabel("Failed to find/read lookup_history.lua. Lookups will not be tracked this time."))
         else:
-            entries = [entry['data'].get(next(iter(entry['data']))) for entry in d]
-            entries = [(entry['word'], entry['book_title'], entry['time']) for entry in entries]
+            entries = []
+            for entry in d:
+                try:
+                    if 'data' in entry:
+                        entry_data = entry['data'].get(next(iter(entry['data'])))
+                        if entry_data and 'word' in entry_data and 'book_title' in entry_data and 'time' in entry_data:
+                            entries.append((entry_data['word'], entry_data['book_title'], entry_data['time']))
+                except (KeyError, StopIteration, TypeError) as e:
+                    logger.debug(f"Skipping malformed lookup history entry: {e}")
+                    continue
+            
             count = 0
             lookups_count_before = self._parent.rec.countLookups(langcode)
             for word, booktitle, timestamp in entries:
