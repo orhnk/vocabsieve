@@ -32,11 +32,21 @@ class AnkiTab(BaseTab):
         self.image_field = QComboBox()
         self.default_notetype_button = QPushButton(
             "Use default note type ('vocabsieve-notes', will be created if it does not exist)")
+        
+        # KOReader location settings
+        self.koreader_reader_path = QLineEdit()
+        self.koreader_sdcard_path = QLineEdit()
+        self.browse_reader_button = QPushButton("Browse...")
+        self.browse_sdcard_button = QPushButton("Browse...")
 
     def setupWidgets(self):
         self.default_notetype_button.setToolTip(
             "This will use the default note type provided by VocabSieve. It will be created if it does not exist.")
         self.default_notetype_button.clicked.connect(self.onDefaultNoteType)
+        
+        # KOReader browse buttons
+        self.browse_reader_button.clicked.connect(self.browseReaderPath)
+        self.browse_sdcard_button.clicked.connect(self.browseSDCardPath)
 
     def loadDecks(self):
         logger.debug("Loading decks")
@@ -190,6 +200,25 @@ class AnkiTab(BaseTab):
         layout.addRow(
             QLabel('Field name for "Image"'),
             self.image_field)
+        
+        # KOReader settings
+        layout.addRow(QLabel("<hr>"))
+        layout.addRow(QLabel("<h3>KOReader settings</h3>"))
+        
+        from PyQt5.QtWidgets import QHBoxLayout, QWidget
+        reader_widget = QWidget()
+        reader_layout = QHBoxLayout(reader_widget)
+        reader_layout.setContentsMargins(0, 0, 0, 0)
+        reader_layout.addWidget(self.koreader_reader_path)
+        reader_layout.addWidget(self.browse_reader_button)
+        layout.addRow(QLabel("Reader partition path\n(contains .koreader folder)"), reader_widget)
+        
+        sdcard_widget = QWidget()
+        sdcard_layout = QHBoxLayout(sdcard_widget)
+        sdcard_layout.setContentsMargins(0, 0, 0, 0)
+        sdcard_layout.addWidget(self.koreader_sdcard_path)
+        sdcard_layout.addWidget(self.browse_sdcard_button)
+        layout.addRow(QLabel("SD card partition path\n(optional, for additional books)"), sdcard_widget)
 
     def toggle_anki_settings(self, value: bool):
         self.anki_api.setEnabled(value)
@@ -215,6 +244,11 @@ class AnkiTab(BaseTab):
         self.register_config_handler(self.enable_anki, 'enable_anki', True)
         self.enable_anki.clicked.connect(self.toggle_anki_settings)
         self.toggle_anki_settings(self.enable_anki.isChecked())
+        
+        # KOReader settings
+        self.register_config_handler(self.koreader_reader_path, 'koreader_reader_partition', '')
+        self.register_config_handler(self.koreader_sdcard_path, 'koreader_sdcard_partition', '')
+        
         api = self.anki_api.text()
         try:
             _ = getVersion(api)
@@ -245,3 +279,23 @@ class AnkiTab(BaseTab):
             self.register_config_handler(self.image_field, 'image_field', "<disabled>")
 
         self.note_type.currentTextChanged.connect(self.loadFields)
+
+    def browseReaderPath(self):
+        from PyQt5.QtWidgets import QFileDialog
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select KOReader partition (contains .koreader folder)",
+            self.koreader_reader_path.text()
+        )
+        if path:
+            self.koreader_reader_path.setText(path)
+    
+    def browseSDCardPath(self):
+        from PyQt5.QtWidgets import QFileDialog
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select SD Card partition (with additional books)",
+            self.koreader_sdcard_path.text()
+        )
+        if path:
+            self.koreader_sdcard_path.setText(path)

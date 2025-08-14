@@ -587,22 +587,38 @@ class MainWindow(MainWindowBase):
             AutoTextImporter(self, path).exec()
 
     def importKoreader(self) -> None:
-        path = QFileDialog.getExistingDirectory(
-            parent=self,
-            caption="Select a directory containing KOReader settings and ebook files",
-            directory=QStandardPaths.writableLocation(QStandardPaths.HomeLocation)
-        )
-        if not path:
-            return
-        try:
-            KoreaderVocabImporter(self, path).exec()
-        except ValueError:
-            QMessageBox.warning(
-                self,
-                "No notes are found",
-                "Check if you've picked the right directory. It should be a folder containing both all of your books and KOReader settings.")
-        except Exception as e:
-            QMessageBox.warning(self, "Something went wrong", "Error: " + repr(e))
+        # Check if we have saved KOReader configuration
+        if KoreaderVocabImporter.has_saved_config():
+            # Use saved configuration
+            try:
+                KoreaderVocabImporter(self).exec()
+            except ValueError as e:
+                # Saved paths are invalid, show error and suggest settings
+                QMessageBox.warning(
+                    self,
+                    "KOReader Configuration Issue",
+                    f"Error: {str(e)}\n\nPlease update your KOReader paths in Settings > Configure > Anki tab > KOReader settings"
+                )
+            except Exception as e:
+                QMessageBox.warning(self, "Something went wrong", "Error: " + repr(e))
+        else:
+            # No saved config, show file dialog for initial setup
+            path = QFileDialog.getExistingDirectory(
+                parent=self,
+                caption="Select a directory containing KOReader settings and ebook files",
+                directory=QStandardPaths.writableLocation(QStandardPaths.HomeLocation)
+            )
+            if not path:
+                return
+            try:
+                KoreaderVocabImporter(self, path).exec()
+            except ValueError:
+                QMessageBox.warning(
+                    self,
+                    "No notes are found",
+                    "Check if you've picked the right directory. It should be a folder containing both all of your books and KOReader settings.")
+            except Exception as e:
+                QMessageBox.warning(self, "Something went wrong", "Error: " + repr(e))
 
     def importWordlist(self) -> None:
         path = QFileDialog.getOpenFileName(
