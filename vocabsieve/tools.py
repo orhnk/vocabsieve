@@ -7,7 +7,7 @@ import unicodedata
 from itertools import zip_longest, islice
 import time
 
-from .constants import FORVO_HEADERS
+from .constants import FORVO_HEADERS, langcodes
 from .vsnt import FIELDS, CARDS, CSS
 from bs4 import BeautifulSoup
 from typing import List, Optional
@@ -79,12 +79,61 @@ def getFields(server, name) -> list:
     return list(result)
 
 
-def prepareAnkiNoteDict(anki_settings: AnkiSettings, note: SRSNote) -> dict:
+_existing_decks_cache: set[str] = set()
+_existing_deck_list_loaded = False
+
+
+def _sanitize_deck_component(component: str) -> str:
+    component = component.replace("::", ":")
+    component = re.sub(r"[:\n\r]+", " ", component)
+    component = re.sub(r"\s+", " ", component).strip()
+    return component
+
+
+def get_deck_name_for_language(anki_settings: AnkiSettings, target_language: Optional[str]) -> str:
+    base_deck = (anki_settings.deck or "").strip()
+    if not target_language:
+        return base_deck
+    language_key = str(target_language).strip()
+    language_label = langcodes.get(language_key, language_key)
+    language_label = _sanitize_deck_component(language_label)
+    if not language_label:
+        return base_deck
+    if base_deck:
+        return f"{base_deck}::{language_label}"
+    return language_label
+
+
+def ensure_deck_exists(server: str, deck_name: str) -> None:
+    global _existing_decks_cache
+    global _existing_deck_list_loaded
+
+    deck_name = deck_name.strip()
+    if not deck_name:
+        return
+    if deck_name in _existing_decks_cache:
+        return
+    if not _existing_deck_list_loaded:
+        try:
+            _existing_decks_cache = set(getDeckList(server))
+            _existing_deck_list_loaded = True
+        except Exception as exc:
+            logger.warning(f"Unable to fetch deck list from AnkiConnect: {exc}")
+            _existing_deck_list_loaded = True
+    if deck_name in _existing_decks_cache:
+        return
+    logger.info(f"Creating Anki deck '{deck_name}'")
+    invoke('createDeck', server, deck=deck_name)
+    _existing_decks_cache.add(deck_name)
+
+
+def prepareAnkiNoteDict(anki_settings: AnkiSettings, note: SRSNote, target_language: Optional[str] = None) -> dict:
     """
     Helper function to create a json to be sent to AnkiConnect
     """
+    deck_name = get_deck_name_for_language(anki_settings, target_language)
     content = {
-        "deckName": anki_settings.deck,
+        "deckName": deck_name if deck_name else anki_settings.deck,
         "modelName": anki_settings.model,
         "fields": {
             anki_settings.word_field: note.word or "",
@@ -449,7 +498,7 @@ def make_dict_source(src_name: str) -> DictionarySource:
         return GoogleTranslateSource(
             langcode,
             options,
-            settings.value("gtrans_api", "https://lingva.lunar.icu"),
+            settings.value("gtrans_api", "https://lingva.ml"),
             settings.value("gtrans_lang", "en")
         )
     else:  # Local, /TODO error handling

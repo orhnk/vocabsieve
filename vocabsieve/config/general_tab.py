@@ -15,7 +15,6 @@ class GeneralTab(BaseTab):
     sources_reloaded_signal = pyqtSignal(list, list)
 
     def initWidgets(self):
-        self.target_language = QComboBox()
         self.lemfreq = QCheckBox("Lemmatize before looking up frequency")
         self.lemfreq.setToolTip(
             "Lemmatize words before trying to find them in the frequency list." +
@@ -35,7 +34,6 @@ class GeneralTab(BaseTab):
             ['mp3', 'ogg']
         )
         self.custom_url.setEnabled(False)
-        self.target_language.addItems(langs_supported.values())
         self.web_preset.addItems([
             "English Wiktionary",
             "Monolingual Wiktionary",
@@ -50,10 +48,6 @@ class GeneralTab(BaseTab):
     def setupLayout(self):
         layout = QFormLayout(self)
         layout.addRow(QLabel("<h3>General</h3>"))
-        layout.addRow(
-            QLabel("Target language"),
-            self.target_language)
-
         layout.addRow(self.bold_word)
 
         layout.addRow(QLabel("Forvo audio format"), self.audio_format)
@@ -70,22 +64,23 @@ class GeneralTab(BaseTab):
 
     def load_dictionaries(self):
         custom_dicts = json.loads(settings.value("custom_dicts", '[]'))
-        dicts = getDictsForLang(
-            langcodes.inverse[self.target_language.currentText()], custom_dicts
-        )
+        lang_code = settings.value("target_language", 'en') or 'en'
+        if not isinstance(lang_code, str):
+            lang_code = str(lang_code)
+        dicts = getDictsForLang(lang_code, custom_dicts)
 
-        audio_dicts = getAudioDictsForLang(
-            langcodes.inverse[self.target_language.currentText()], custom_dicts
-        )
+        audio_dicts = getAudioDictsForLang(lang_code, custom_dicts)
         self.sources_reloaded_signal.emit(dicts, audio_dicts)
 
     def load_freq_sources(self):
         custom_dicts = json.loads(settings.value("custom_dicts", '[]'))
-        sources = getFreqlistsForLang(
-            langcodes.inverse[self.target_language.currentText()], custom_dicts)
+        lang_code = settings.value("target_language", 'en') or 'en'
+        if not isinstance(lang_code, str):
+            lang_code = str(lang_code)
+        sources = getFreqlistsForLang(lang_code, custom_dicts)
         logger.info(
             "Loading frequency sources for language " +
-            self.target_language.currentText() +
+            langcodes.get(lang_code, lang_code) +
             ": " +
             str(sources))
         self.freq_source.blockSignals(True)
@@ -99,11 +94,6 @@ class GeneralTab(BaseTab):
                 "freq_source", "<disabled>"))
 
     def setupAutosave(self):
-        self.register_config_handler(
-            self.target_language,
-            'target_language',
-            'en',
-            code_translate=True)
         self.register_config_handler(self.audio_format, 'audio_format', 'mp3')
         self.register_config_handler(self.lemfreq, 'lemfreq', True)
 
@@ -118,19 +108,25 @@ class GeneralTab(BaseTab):
             'English Wiktionary')
         self.register_config_handler(self.bold_word, 'bold_word', True)
         self.register_config_handler(self.custom_url, 'custom_url', "https://en.wiktionary.org/wiki/@@@@")
-        self.target_language.currentTextChanged.connect(self.load_dictionaries)
-        self.target_language.currentTextChanged.connect(self.load_freq_sources)
-        self.target_language.currentTextChanged.connect(self.load_url)
         self.web_preset.currentTextChanged.connect(self.load_url)
         self.gtrans_lang.currentTextChanged.connect(self.load_url)
         self.load_url()
         self.load_freq_sources()
+        self.load_dictionaries()
         self.register_config_handler(
             self.freq_source, 'freq_source', '<disabled>')
 
     def load_url(self):
-        lang = settings.value("target_language", "en")
-        tolang = settings.value("gtrans_lang", "en")
+        lang = settings.value("target_language", "en") or "en"
+        tolang = settings.value("gtrans_lang", "en") or "en"
+        if not isinstance(lang, str):
+            lang = str(lang)
+        if not isinstance(tolang, str):
+            tolang = str(tolang)
+        if lang not in langcodes:
+            lang = "en"
+        if tolang not in langcodes:
+            tolang = "en"
         langfull = langcodes[lang]
         tolangfull = langcodes[tolang]
         presets = bidict({
@@ -148,6 +144,11 @@ class GeneralTab(BaseTab):
             self.custom_url.setText(
                 presets[self.web_preset.currentText()]
             )
+
+    def on_target_language_changed(self, _lang_code: str) -> None:
+        self.load_dictionaries()
+        self.load_freq_sources()
+        self.load_url()
 
     def dictmanager(self):
         importer = DictManager(self)

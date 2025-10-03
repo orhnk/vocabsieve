@@ -54,6 +54,9 @@ class ConfigDialog(QDialog):
         self.tabs.addTab(self.tab_i, "Interface")
         self.tabs.addTab(self.tab_m, "Misc")
 
+        if hasattr(self._parent, "target_language_changed"):
+            self._parent.target_language_changed.connect(self.tab_g.on_target_language_changed)
+
     def setupTabs(self):
         self.tab_g.sources_reloaded_signal.connect(self.tab_s.reloadSources)
         self.tab_s.sg2_visibility_changed.connect(self.changeMainLayout)
@@ -112,12 +115,12 @@ class ConfigDialog(QDialog):
             if settings.value("orientation", "Vertical") == "Vertical":
                 self._parent._layout.removeWidget(self._parent.definition)
                 self._parent._layout.addWidget(
-                    self._parent.definition, 6, 0, 2, 3)
+                    self._parent.definition, 8, 0, 2, 3)
                 self._parent._layout.addWidget(
-                    self._parent.definition2, 8, 0, 2, 3)
+                    self._parent.definition2, 10, 0, 2, 3)
                 self._parent.definition2.setVisible(True)
         else:
             self._parent._layout.removeWidget(self._parent.definition)
             self._parent._layout.removeWidget(self._parent.definition2)
             self._parent.definition2.setVisible(False)
-            self._parent._layout.addWidget(self._parent.definition, 6, 0, 4, 3)
+            self._parent._layout.addWidget(self._parent.definition, 8, 0, 4, 3)

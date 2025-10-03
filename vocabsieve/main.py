@@ -36,6 +36,7 @@ from .tools import (
     make_audio_source_group,
     modelFieldNames,
     prepareAnkiNoteDict,
+    ensure_deck_exists,
     is_oneword,
     addNote,
     findNotes,
@@ -559,6 +560,7 @@ class MainWindow(MainWindowBase):
             settings_dialog = ConfigDialog(self)
             settings_dialog.exec()
             self.initSources()
+            self.syncTargetLanguageCombo(apply=True)
         self.pause_polling = False
 
     def importKindle(self):
@@ -980,11 +982,14 @@ class MainWindow(MainWindowBase):
             tags=settings.value("tags", "vocabsieve").strip().split() + self.tags.text().strip().split()
         )
 
-        content = prepareAnkiNoteDict(anki_settings, note)
+        target_language = self.getLanguage()
+        content = prepareAnkiNoteDict(anki_settings, note, target_language)
         logger.debug("Prepared Anki note json" + json.dumps(content, indent=4, ensure_ascii=False))
         try:
+            anki_server = settings.value("anki_api", "http://127.0.0.1:8765")
+            ensure_deck_exists(anki_server, content.get("deckName", anki_settings.deck))
             self.last_added_note_id = addNote(
-                settings.value("anki_api", "http://127.0.0.1:8765"),
+                anki_server,
                 content,
                 allow_duplicates
             )

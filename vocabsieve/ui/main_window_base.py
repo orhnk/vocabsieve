@@ -1,6 +1,6 @@
 from PyQt5.QtWidgets import QMainWindow, QWidget, QGridLayout, QLabel, QPushButton, QCheckBox, \
     QStatusBar, QMenuBar, \
-    QSizePolicy, QApplication, QLineEdit
+    QSizePolicy, QApplication, QLineEdit, QComboBox
 from PyQt5.QtGui import QDesktopServices, QKeyEvent
 from PyQt5.QtCore import QUrl, pyqtSignal, Qt, QObject, QEvent
 from .audio_selector import AudioSelector
@@ -9,9 +9,11 @@ from .multi_definition_widget import MultiDefinitionWidget
 from .word_record_display import WordRecordDisplay
 
 from ..global_names import app_title, settings, datapath, MOD, logger
+from ..constants import langcodes
 
 from ..record import Record
 from ..local_dictionary import LocalDictionary
+from ..dictionary import langs_supported
 from .searchable_boldable_text_edit import SearchableBoldableTextEdit
 from .freq_display_widget import FreqDisplayWidget
 from .about import AboutDialog
@@ -29,6 +31,7 @@ from sentence_splitter import SentenceSplitter, SentenceSplitterException
 
 class MainWindowBase(QMainWindow):
     audio_fetched = pyqtSignal(dict)
+    target_language_changed = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -36,10 +39,18 @@ class MainWindowBase(QMainWindow):
         self.setFocusPolicy(Qt.StrongFocus)
         self.widget = QWidget()
         self.rec = Record(settings, datapath)
+        lang_code = settings.value("target_language", "en") or "en"
+        if not isinstance(lang_code, str):
+            lang_code = str(lang_code)
+        self._current_target_language = lang_code
+        self._updating_target_language_combo = False
         try:
-            self.splitter = SentenceSplitter(language=settings.value("target_language", "en"))
+            self.splitter = SentenceSplitter(language=lang_code)
         except SentenceSplitterException:
-            logger.error("Sentence splitter failed to initialize. Falling back to English.")
+            logger.error(
+                "Sentence splitter failed to initialize for '%s'. Falling back to English splitter.",
+                lang_code,
+            )
             self.splitter = SentenceSplitter(language="en")
         self.setCentralWidget(self.widget)
         self.previousWord = ""
@@ -87,6 +98,11 @@ class MainWindowBase(QMainWindow):
         #self.sentence.setMaximumHeight(300)
         self.word = QLineEdit()
         self.word.setPlaceholderText("Word")
+        self.target_language_combo = QComboBox()
+        self.target_language_combo.setObjectName("targetLanguageCombo")
+        self._populateTargetLanguageCombo()
+        self.syncTargetLanguageCombo(apply=False)
+        self.target_language_combo.currentIndexChanged.connect(self._onTargetLanguageIndexChanged)
         self.definition = MultiDefinitionWidget(self.word)
         self.definition.setMinimumHeight(70)
         #self.definition.setMaximumHeight(1800)
@@ -176,21 +192,22 @@ class MainWindowBase(QMainWindow):
 
         layout.addWidget(self.read_button, 4, 0)
         layout.addWidget(self.web_button, 4, 1)
-        layout.addWidget(self.image_viewer, 0, 2, 5, 1)
-        layout.addWidget(self.sentence, 5, 0, 1, 3)
-        layout.setRowStretch(5, 1)
+        layout.addWidget(self.image_viewer, 0, 2, 6, 1)
+        layout.addWidget(self.target_language_combo, 5, 0, 1, 2)
+        layout.addWidget(self.sentence, 6, 0, 1, 3)
+        layout.setRowStretch(6, 1)
 
-        layout.addWidget(self.word, 6, 0)
-        layout.addWidget(self.freq_widget, 6, 1)
-        layout.addWidget(self.word_record_display, 6, 2)
+        layout.addWidget(self.word, 7, 0)
+        layout.addWidget(self.freq_widget, 7, 1)
+        layout.addWidget(self.word_record_display, 7, 2)
 
-        layout.setRowStretch(7, 2)
-        layout.setRowStretch(9, 2)
+        layout.setRowStretch(8, 2)
+        layout.setRowStretch(10, 2)
         if settings.value("sg2_enabled", False, type=bool):
-            layout.addWidget(self.definition, 7, 0, 2, 3)
-            layout.addWidget(self.definition2, 9, 0, 2, 3)
+            layout.addWidget(self.definition, 8, 0, 2, 3)
+            layout.addWidget(self.definition2, 10, 0, 2, 3)
         else:
-            layout.addWidget(self.definition, 7, 0, 4, 3)
+            layout.addWidget(self.definition, 8, 0, 4, 3)
 
         layout.addWidget(self.audio_selector, 12, 0, 1, 3)
         layout.setRowStretch(12, 1)
@@ -204,6 +221,73 @@ class MainWindowBase(QMainWindow):
         layout.setColumnStretch(1, 2)
         layout.setColumnStretch(2, 5)
         self._layout = layout
+
+    def _populateTargetLanguageCombo(self) -> None:
+        self.target_language_combo.clear()
+        options = sorted(langs_supported.items(), key=lambda item: item[1].lower())
+        for code, name in options:
+            self.target_language_combo.addItem(name, code)
+
+    def syncTargetLanguageCombo(self, apply: bool = False) -> None:
+        lang_code = settings.value("target_language", "en") or "en"
+        self._updating_target_language_combo = True
+        try:
+            index = self.target_language_combo.findData(lang_code)
+            if index < 0:
+                index = self.target_language_combo.findData("en")
+            if index < 0 and self.target_language_combo.count() > 0:
+                index = 0
+            if index >= 0:
+                self.target_language_combo.setCurrentIndex(index)
+        finally:
+            self._updating_target_language_combo = False
+        if apply:
+            self._setTargetLanguage(lang_code, persist=False)
+
+    def _onTargetLanguageIndexChanged(self, index: int) -> None:
+        if self._updating_target_language_combo or index < 0:
+            return
+        code = self.target_language_combo.itemData(index)
+        if not code:
+            return
+        self._setTargetLanguage(str(code), persist=True)
+
+    def _setTargetLanguage(self, code: str, *, persist: bool, force: bool = False) -> None:
+        if not code:
+            code = "en"
+        if not isinstance(code, str):
+            code = str(code)
+        if code not in langcodes:
+            logger.warning("Unknown target language '%s', defaulting to English.", code)
+            code = "en"
+        previous = self._current_target_language
+        if persist:
+            if settings.value("target_language", "en") != code:
+                settings.setValue("target_language", code)
+                settings.sync()
+        final_code = self._apply_sentence_splitter(code)
+        if final_code != code:
+            if settings.value("target_language", "en") != final_code:
+                settings.setValue("target_language", final_code)
+                settings.sync()
+            self.syncTargetLanguageCombo(apply=False)
+        if not force and previous == final_code:
+            return
+        if hasattr(self, "initSources"):
+            self.initSources()
+        self.target_language_changed.emit(final_code)
+
+    def _apply_sentence_splitter(self, code: str) -> str:
+        try:
+            self.splitter = SentenceSplitter(language=code)
+        except SentenceSplitterException:
+            logger.error(
+                "Sentence splitter failed for language '%s'. Falling back to English splitter only.",
+                code,
+            )
+            self.splitter = SentenceSplitter(language="en")
+        self._current_target_language = code
+        return code
 
     def onHelp(self) -> None:
         url = f"https://docs.freelanguagetools.org/"

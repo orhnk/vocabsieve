@@ -61,4 +61,4 @@ class NetworkTab(BaseTab):
         self.register_config_handler(
             self.gtrans_api,
             'gtrans_api',
-            'https://lingva.lunar.icu')
+            'https://lingva.ml')

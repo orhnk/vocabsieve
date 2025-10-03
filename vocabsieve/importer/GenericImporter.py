@@ -6,7 +6,7 @@ from .BatchNotePreviewer import BatchNotePreviewer
 from ..ui.main_window_base import MainWindowBase
 from .models import ReadingNote
 from ..models import SRSNote
-from ..tools import prepareAnkiNoteDict, addNotes, remove_punctuations, canAddNotes
+from ..tools import prepareAnkiNoteDict, addNotes, remove_punctuations, canAddNotes, ensure_deck_exists
 
 import re
 import os
@@ -235,17 +235,21 @@ class GenericImporter(QDialog):
         notes_data = []
         for note in self.anki_notes:
             notes_data.append(
-                prepareAnkiNoteDict(self._parent.getAnkiSettings(), note)
+                prepareAnkiNoteDict(self._parent.getAnkiSettings(), note, self.lang)
             )
 
         # Check if we can add notes
         logger.info(f"Trying to add {len(notes_data)} notes to Anki.")
-        checks = canAddNotes(settings.value("anki_api"), notes_data)
+        if notes_data:
+            anki_server = settings.value("anki_api", "http://127.0.0.1:8765")
+            for deck_name in {note_data.get("deckName") for note_data in notes_data if note_data.get("deckName")}:
+                ensure_deck_exists(anki_server, str(deck_name))
+        checks = canAddNotes(settings.value("anki_api", "http://127.0.0.1:8765"), notes_data)
         logger.info(f"{sum(checks)} out of {len(checks)} notes can be added to Anki, proceeding.")
         # Filter out the notes that can't be added
         notes_data = list(itertools.compress(notes_data, checks))
         logger.info(f"Sending {len(notes_data)} notes to AnkiConnect")
-        res = addNotes(settings.value("anki_api"), notes_data)
+        res = addNotes(settings.value("anki_api", "http://127.0.0.1:8765"), notes_data)
         # Record last import data
         if self.methodname not in ('auto', 'wordlist'):  # don't save for auto vocab extraction
             settings.setValue("last_import_method", self.methodname)

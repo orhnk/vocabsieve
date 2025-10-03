@@ -13,6 +13,17 @@ from ..global_names import MOD
 
 DEFAULT_PLACEHOLDER_TEXT = f"Look up a word by double clicking it or by selecting it, then pressing {MOD}+D.\nUse Shift-{MOD}+D to look up the word without lemmatization."
 NEXT_DEFINITION_SCROLL_COUNT_TRANSITION_THRESHOLD = 3
+LONG_QUERY_WORD_THRESHOLD = 4
+
+
+def choose_sources_for_query(sources: list[DictionarySource], query: str) -> list[DictionarySource]:
+    """Return the preferred sources for a lookup query."""
+    tokens = [token for token in query.split() if token]
+    if len(tokens) > LONG_QUERY_WORD_THRESHOLD:
+        for source in sources:
+            if source.name == "Google Translate":
+                return [source]
+    return sources
 
 
 def sign(number):
@@ -77,6 +88,7 @@ class MultiDefinitionWidget(SearchableTextEdit):
     def __init__(self, word_widget: Optional[QLineEdit] = None):
         super().__init__()
         self.sources: list[DictionarySource] = []
+        self._active_sources: list[DictionarySource] = []
         self.word_widget = word_widget
         self.current_target: str = ""
         self._layout = QVBoxLayout(self)
@@ -137,8 +149,11 @@ class MultiDefinitionWidget(SearchableTextEdit):
     def lookup(self, word: str, no_lemma: bool, rules: list[tuple[str, str]]):
         self.reset()
         self.current_target = word
-        logger.debug(f"Looking up {word} in {self.sources}")
-        for source in self.sources:
+        self._active_sources = choose_sources_for_query(self.sources, word)
+        if len(self._active_sources) < len(self.sources):
+            logger.debug("Long query detected; using Google Translate only")
+        logger.debug(f"Looking up {word} in {self._active_sources}")
+        for source in self._active_sources:
             self._lookup_in_source(source, word, no_lemma=no_lemma, rules=rules)
 
     def _lookup_in_source(self, source: DictionarySource, word: str,
@@ -165,7 +180,7 @@ class MultiDefinitionWidget(SearchableTextEdit):
     def appendDefinition(self, definitions: list[Definition]):
         self.definitions.extend(definitions)
         # populate the definitions when all sources have been looked up
-        if len(set(defi.source for defi in self.definitions)) == len(self.sources):
+        if self._active_sources and len(set(defi.source for defi in self.definitions)) == len(self._active_sources):
             logger.debug("All sources have been looked up")
             self.populateDefinitions()
 
@@ -174,7 +189,9 @@ class MultiDefinitionWidget(SearchableTextEdit):
         Sort and filter the definitions we found.
         Definitions may be out of order due to concurrency
         """
-        index_map = {source.name: i for i, source in enumerate(self.sources)}
+        if not self._active_sources:
+            return
+        index_map = {source.name: i for i, source in enumerate(self._active_sources)}
         # Sort definitions by source order, stable sort
         self.definitions.sort(key=lambda defi: index_map[defi.source])
         # filter out error definitions
@@ -264,6 +281,7 @@ class MultiDefinitionWidget(SearchableTextEdit):
         self.setText("")
         self.info_label.setText("")
         self.counter.setText("0/0")
+        self._active_sources = []
         # TODO try to remove references to threads and workers without crashing # pylint: disable=fixme
 
     def getSource(self, source_name: str) -> Optional[DictionarySource]:
