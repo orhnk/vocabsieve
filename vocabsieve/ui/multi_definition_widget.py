@@ -57,7 +57,7 @@ class ButtonsBoxWidget(QWidget):
 
 
 class LookupWorker(QObject):
-    got_definitions = pyqtSignal(list)
+    got_definitions = pyqtSignal(str, object)
     finished = pyqtSignal()
 
     def __init__(self, source: DictionarySource, word: str, no_lemma: bool, rules: list[tuple[str, str]]):
@@ -69,6 +69,9 @@ class LookupWorker(QObject):
 
     def run(self):
         start = time.time()
+        if QThread.currentThread().isInterruptionRequested():
+            self.finished.emit()
+            return
         definitions = self.source.define(self.word, no_lemma=self.no_lemma)
         any_definitions = any(defi.definition is not None for defi in definitions)
         if not any_definitions and self.rules:
@@ -77,7 +80,10 @@ class LookupWorker(QObject):
                 apply_word_rules(self.word, self.rules),
                 no_lemma=self.no_lemma
             )
-        self.got_definitions.emit(definitions)
+        if QThread.currentThread().isInterruptionRequested():
+            self.finished.emit()
+            return
+        self.got_definitions.emit(self.source.name, definitions)
         logger.debug(f"LookupWorker: looked up {self.word} in {self.source.name} in {time.time()-start:.2f} seconds")
         self.finished.emit()
 
@@ -116,8 +122,10 @@ class MultiDefinitionWidget(SearchableTextEdit):
         prev_button.clicked.connect(self.back)
         next_button.clicked.connect(self.forward)
 
-        self.threads: list[QThread] = []
-        self.workers: list[LookupWorker] = []
+        self.threads = []
+        self.workers = []
+        self._source_results = {}
+        self._pending_source_names = set()
 
     def wheelEvent(self, event):
         if len(self.sources) > 1:
@@ -153,6 +161,10 @@ class MultiDefinitionWidget(SearchableTextEdit):
         if len(self._active_sources) < len(self.sources):
             logger.debug("Long query detected; using Google Translate only")
         logger.debug(f"Looking up {word} in {self._active_sources}")
+        self._pending_source_names = {source.name for source in self._active_sources}
+        self._source_results = {}
+        if self._active_sources:
+            self.setPlaceholderText(f"Looking up \"{word}\"...")
         for source in self._active_sources:
             self._lookup_in_source(source, word, no_lemma=no_lemma, rules=rules)
 
@@ -161,12 +173,15 @@ class MultiDefinitionWidget(SearchableTextEdit):
         if source.INTERNET:
             lookup_thread = QThread()
             lookup_worker = LookupWorker(source, word, no_lemma, rules)
+            lookup_worker._thread = lookup_thread  # type: ignore[attr-defined]
+            lookup_thread._worker = lookup_worker  # type: ignore[attr-defined]
             lookup_worker.moveToThread(lookup_thread)
             lookup_thread.started.connect(lookup_worker.run)
             lookup_worker.got_definitions.connect(self.appendDefinition)
             lookup_worker.finished.connect(lookup_thread.quit)
             lookup_worker.finished.connect(lookup_worker.deleteLater)
             lookup_thread.finished.connect(lookup_thread.deleteLater)
+            lookup_thread.finished.connect(lambda thr=lookup_thread, worker=lookup_worker: self._cleanup_thread(thr, worker))
             lookup_thread.start()
 
             # Keep references to avoid garbage collection, otherwise this crashes
@@ -174,37 +189,81 @@ class MultiDefinitionWidget(SearchableTextEdit):
             self.workers.append(lookup_worker)
 
         else:  # Local source, no thread
-            self.appendDefinition(source.define(word, no_lemma=no_lemma))
+            self.appendDefinition(source.name, source.define(word, no_lemma=no_lemma))
 
-    @pyqtSlot(list)
-    def appendDefinition(self, definitions: list[Definition]):
-        self.definitions.extend(definitions)
-        # populate the definitions when all sources have been looked up
-        if self._active_sources and len(set(defi.source for defi in self.definitions)) == len(self._active_sources):
-            logger.debug("All sources have been looked up")
-            self.populateDefinitions()
+    def _cleanup_thread(self, thread: QThread | None, worker: LookupWorker | None) -> None:
+        if thread in self.threads:
+            self.threads.remove(thread)
+        if worker in self.workers:
+            self.workers.remove(worker)
+        if thread is not None and hasattr(thread, "_worker"):
+            try:
+                delattr(thread, "_worker")
+            except AttributeError:
+                pass
+        if worker is not None and hasattr(worker, "_thread"):
+            try:
+                delattr(worker, "_thread")
+            except AttributeError:
+                pass
 
-    def populateDefinitions(self):
-        """
-        Sort and filter the definitions we found.
-        Definitions may be out of order due to concurrency
-        """
+    @pyqtSlot(str, object)
+    def appendDefinition(self, source_name: str, definitions_obj):
+        if isinstance(definitions_obj, list):
+            definitions = list(definitions_obj)
+        elif definitions_obj is None:
+            definitions = []
+        elif isinstance(definitions_obj, Definition):
+            definitions = [definitions_obj]
+        else:
+            try:
+                definitions = list(definitions_obj)
+            except TypeError:
+                definitions = []
+        self._source_results[source_name] = definitions
+        self._pending_source_names.discard(source_name)
+        is_final = not self._pending_source_names
+        self.populateDefinitions(final=is_final)
+
+    def populateDefinitions(self, final: bool = False):
+        """Aggregate definitions we have so far and update the display."""
         if not self._active_sources:
             return
-        index_map = {source.name: i for i, source in enumerate(self._active_sources)}
-        # Sort definitions by source order, stable sort
-        self.definitions.sort(key=lambda defi: index_map[defi.source])
-        # filter out error definitions
-        self.definitions = [defi for defi in self.definitions if defi.definition is not None]
-        if not any(defi.definition for defi in self.definitions):
+
+        aggregated: list[Definition] = []
+        for source in self._active_sources:
+            items = self._source_results.get(source.name)
+            if not items:
+                continue
+            aggregated.extend(items)
+
+        filtered = [defi for defi in aggregated if defi.definition is not None]
+
+        previous_definition = self.currentDefinition
+        previous_count = len(self.definitions)
+
+        self.definitions = filtered
+
+        if self.definitions:
+            if previous_definition and previous_definition in self.definitions:
+                self.currentIndex = self.definitions.index(previous_definition)
+            elif previous_count == 0:
+                self.currentIndex = 0
+            else:
+                self.currentIndex = min(self.currentIndex, len(self.definitions) - 1)
+            self.setPlaceholderText(DEFAULT_PLACEHOLDER_TEXT)
+            self.updateIndex()
+        elif final:
+            self.currentDefinition = None
+            self.currentIndex = 0
+            self.setText("")
+            self.info_label.setText("")
+            self.counter.setText("0/0")
             if self.word_widget:
                 self.word_widget.setText(self.current_target)
             self.setPlaceholderText("No definitions found for \"" + self.current_target
                                     + "\". You can still type in a definition manually to add to Anki.")
-        else:
-            self.setPlaceholderText(DEFAULT_PLACEHOLDER_TEXT)
-        self.currentIndex = 0
-        self.updateIndex()
+
 
     def getFirstDefinition(self, target) -> Optional[Definition]:
         """
@@ -275,6 +334,7 @@ class MultiDefinitionWidget(SearchableTextEdit):
             self.setCurrentIndex(len(self.definitions) - 1)
 
     def reset(self):
+        self._stop_all_threads()
         self.definitions = []
         self.currentDefinition = None
         self.currentIndex = 0
@@ -282,6 +342,8 @@ class MultiDefinitionWidget(SearchableTextEdit):
         self.info_label.setText("")
         self.counter.setText("0/0")
         self._active_sources = []
+        self._source_results = {}
+        self._pending_source_names = set()
         # TODO try to remove references to threads and workers without crashing # pylint: disable=fixme
 
     def getSource(self, source_name: str) -> Optional[DictionarySource]:
@@ -289,6 +351,45 @@ class MultiDefinitionWidget(SearchableTextEdit):
             if source.name == source_name:
                 return source
         return None
+
+    def _stop_all_threads(self):
+        if not self.threads:
+            return
+        active_threads = list(self.threads)
+        active_workers = list(self.workers)
+        for worker in active_workers:
+            try:
+                worker.got_definitions.disconnect(self.appendDefinition)
+            except (TypeError, RuntimeError):
+                pass
+            thread = getattr(worker, "_thread", None)
+            if isinstance(thread, QThread):
+                thread.requestInterruption()
+        for thread in active_threads:
+            thread.requestInterruption()
+            thread.quit()
+            if not thread.wait(5000):
+                logger.warning("Lookup thread did not exit in time; terminating")
+                thread.terminate()
+                thread.wait()
+            worker = getattr(thread, "_worker", None)
+            if isinstance(worker, LookupWorker):
+                self._cleanup_thread(thread, worker)
+                try:
+                    worker.deleteLater()
+                except RuntimeError:
+                    pass
+        self.threads = [thread for thread in self.threads if thread.isRunning()]
+        pruned_workers = []
+        for worker in self.workers:
+            thread = getattr(worker, "_thread", None)
+            if isinstance(thread, QThread) and thread.isRunning():
+                pruned_workers.append(worker)
+        self.workers = pruned_workers
+
+    def closeEvent(self, event):
+        self._stop_all_threads()
+        super().closeEvent(event)
 
     def toAnki(self, defi: Optional[Definition] = None) -> str:
         """Process definitions before sending to Anki"""
