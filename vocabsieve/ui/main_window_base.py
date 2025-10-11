@@ -197,10 +197,6 @@ class MainWindowBase(QMainWindow):
         layout.addWidget(self.sentence, 6, 0, 1, 3)
         layout.setRowStretch(6, 1)
 
-        layout.addWidget(self.word, 7, 0)
-        layout.addWidget(self.freq_widget, 7, 1)
-        layout.addWidget(self.word_record_display, 7, 2)
-
         layout.setRowStretch(8, 2)
         layout.setRowStretch(10, 2)
         if settings.value("sg2_enabled", False, type=bool):
@@ -209,13 +205,18 @@ class MainWindowBase(QMainWindow):
         else:
             layout.addWidget(self.definition, 8, 0, 4, 3)
 
-        layout.addWidget(self.audio_selector, 12, 0, 1, 3)
-        layout.setRowStretch(12, 1)
+        layout.addWidget(self.word_record_display, 11, 2)
 
-        layout.addWidget(self.tags, 13, 0, 1, 3)
+        layout.addWidget(self.audio_selector, 14, 0, 1, 3)
+        layout.setRowStretch(14, 1)
 
-        layout.addWidget(self.toanki_button, 14, 1, 1, 2)
-        layout.addWidget(self.view_last_note_button, 14, 0)
+        layout.addWidget(self.freq_widget, 15, 0)
+        layout.addWidget(self.word, 15, 1, 1, 2)
+
+        layout.addWidget(self.tags, 16, 0, 1, 3)
+
+        layout.addWidget(self.view_last_note_button, 17, 0)
+        layout.addWidget(self.toanki_button, 17, 1, 1, 2)
 
         layout.setColumnStretch(0, 2)
         layout.setColumnStretch(1, 2)
