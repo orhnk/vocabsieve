@@ -129,6 +129,7 @@ class MainWindowBase(QMainWindow):
         self.stats_label = QLabel()
 
         self.single_word = QCheckBox("Single word lookups")
+        self.single_word.setChecked(True)
         self.single_word.setToolTip(
             "If enabled, vocabsieve will act as a quick dictionary and look up any single words copied to the clipboard.\n"
             "This can potentially send your clipboard contents over the network if an online dictionary service is used.\n"
