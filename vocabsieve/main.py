@@ -52,6 +52,7 @@ from .models import (AudioSourceGroup, KnownMetadata, LookupRecord, SRSNote, Tra
                      WordRecord, LookupTrigger)
 from .lemmatizer import lem_word
 from .uncaught_hook import ExceptionCatcher
+from .anki_templates import initialize_templates
 
 
 class MainWindow(MainWindowBase):
@@ -559,6 +560,8 @@ class MainWindow(MainWindowBase):
         if self.checkAnkiConnect():
             settings_dialog = ConfigDialog(self)
             settings_dialog.exec()
+            initialize_templates()
+            self._update_template_button_label()
             self.initSources()
             self.syncTargetLanguageCombo(apply=True)
         self.pause_polling = False

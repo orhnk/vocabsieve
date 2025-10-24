@@ -1,5 +1,5 @@
 from PyQt5.QtWidgets import QMainWindow, QWidget, QGridLayout, QLabel, QPushButton, QCheckBox, \
-    QStatusBar, QMenuBar, \
+    QStatusBar, QMenuBar, QMenu, \
     QSizePolicy, QApplication, QLineEdit, QComboBox
 from PyQt5.QtGui import QDesktopServices, QKeyEvent
 from PyQt5.QtCore import QUrl, pyqtSignal, Qt, QObject, QEvent
@@ -20,6 +20,15 @@ from .about import AboutDialog
 from .logview import LogView
 from ..models import AnkiSettings, WordActionWeights, KeyAction
 
+from ..anki_templates import (
+    active_template_name,
+    apply_template_by_name,
+    initialize_templates,
+    load_templates,
+)
+
+from functools import partial
+
 import platform
 import os
 from sentence_splitter import SentenceSplitter, SentenceSplitterException
@@ -35,6 +44,7 @@ class MainWindowBase(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
+        initialize_templates()
         self.setWindowTitle(app_title(True))
         self.setFocusPolicy(Qt.StrongFocus)
         self.widget = QWidget()
@@ -119,6 +129,13 @@ class MainWindowBase(QMainWindow):
         self.toanki_button = QPushButton(f"Add note [{MOD}+S]")
         self.view_last_note_button = QPushButton("View last note")
         self.view_last_note_button.setToolTip(f"View the last added note. [{MOD}+Shift+F]")
+        self.template_button = QPushButton()
+        self.template_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.template_button.setToolTip("Select an Anki card template")
+        self.template_menu = QMenu(self.template_button)
+        self.template_menu.aboutToShow.connect(self._populate_template_menu)
+        self.template_button.setMenu(self.template_menu)
+        self._update_template_button_label()
 
         self.read_button = QPushButton("Read clipboard")
         self.read_button.setToolTip(
@@ -217,12 +234,47 @@ class MainWindowBase(QMainWindow):
         layout.addWidget(self.tags, 16, 0, 1, 3)
 
         layout.addWidget(self.view_last_note_button, 17, 0)
-        layout.addWidget(self.toanki_button, 17, 1, 1, 2)
+        layout.addWidget(self.template_button, 17, 1)
+        layout.addWidget(self.toanki_button, 17, 2)
 
         layout.setColumnStretch(0, 2)
         layout.setColumnStretch(1, 2)
         layout.setColumnStretch(2, 5)
         self._layout = layout
+
+    def _populate_template_menu(self) -> None:
+        self.template_menu.clear()
+        initialize_templates()
+        templates = load_templates()
+        if not templates:
+            placeholder = self.template_menu.addAction("No templates available")
+            placeholder.setEnabled(False)
+            return
+        current = active_template_name()
+        for template in templates:
+            action = self.template_menu.addAction(template.name)
+            action.setCheckable(True)
+            action.setChecked(template.name == current)
+            action.triggered.connect(partial(self._on_template_selected, template.name))
+
+    def _on_template_selected(self, template_name: str) -> None:
+        template = apply_template_by_name(template_name)
+        if template is None:
+            self.status(f"Template '{template_name}' is not available")
+            return
+        self._update_template_button_label()
+        self.status(f"Template set to '{template.name}'")
+
+    def _update_template_button_label(self) -> None:
+        if not hasattr(self, "template_button"):
+            return
+        name = active_template_name() or "Default"
+        if len(name) > 24:
+            name_display = name[:21] + "..."
+        else:
+            name_display = name
+        self.template_button.setText(f"Template: {name_display}")
+        self.template_button.setToolTip(f"Select an Anki card template (current: {name})")
 
     def _populateTargetLanguageCombo(self) -> None:
         self.target_language_combo.clear()
