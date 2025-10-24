@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import QApplication, QMessageBox, QAction, QShortcut, QFile
 import qdarktheme
 
 from .global_names import datapath, lock, app, settings  # First local import
+from .anki_templates import get_current_template, get_current_template_name
 from .analyzer import BookAnalyzer
 from .config import ConfigDialog
 from .stats import StatisticsWindow
@@ -52,7 +53,6 @@ from .models import (AudioSourceGroup, KnownMetadata, LookupRecord, SRSNote, Tra
                      WordRecord, LookupTrigger)
 from .lemmatizer import lem_word
 from .uncaught_hook import ExceptionCatcher
-from .anki_templates import initialize_templates
 
 
 class MainWindow(MainWindowBase):
@@ -73,6 +73,7 @@ class MainWindow(MainWindowBase):
         self.last_added_note_id: int = -1
         self.previous_word: str = ""
         self.previous_trigger: LookupTrigger = LookupTrigger.double_clicked
+        self.note_type_first_field: str = ""
         self.pause_polling: bool = False
         self.cognates: set[str] = set()
         app.applicationStateChanged.connect(self.onApplicationStateChanged)
@@ -84,6 +85,8 @@ class MainWindow(MainWindowBase):
         self.initSources()
         self.initTimers()
         self.got_updates.connect(self.gotUpdatesInfo)
+        self.template_changed.connect(self.onTemplateChanged)
+        self.onTemplateChanged(get_current_template_name())
 
         self.setupClipboardMonitor()
         self.setMinimumWidth(settings.value("minimum_width", 550, type=int))
@@ -95,6 +98,10 @@ class MainWindow(MainWindowBase):
     def onApplicationStateChanged(self, state):
         if state == Qt.ApplicationActive:
             self.last_got_focus = time.time()
+
+    def onTemplateChanged(self, name: str) -> None:
+        self.note_type_first_field = ""
+        self.status(f"Using template '{name}'")
 
     def setupClipboardMonitor(self):
         self.sentence.double_clicked.connect(self.lookup)
@@ -560,10 +567,9 @@ class MainWindow(MainWindowBase):
         if self.checkAnkiConnect():
             settings_dialog = ConfigDialog(self)
             settings_dialog.exec()
-            initialize_templates()
-            self._update_template_button_label()
             self.initSources()
             self.syncTargetLanguageCombo(apply=True)
+            self.syncTemplateCombo(apply=True)
         self.pause_polling = False
 
     def importKindle(self):
@@ -755,7 +761,12 @@ class MainWindow(MainWindowBase):
             return []
         api = settings.value("anki_api", "http://127.0.0.1:8765")
 
-        note_type = settings.value("note_type")
+        template = get_current_template()
+        note_type = template.note_type
+        if not note_type:
+            logger.error("No note type configured for template '%s'", template.name)
+            return []
+
         logger.debug(f'Trying to obtain fields for note type "{note_type}"')
 
         fields = modelFieldNames(api, note_type)
@@ -764,18 +775,28 @@ class MainWindow(MainWindowBase):
             logger.error(f"Could not obtain fields for note type {note_type}")
             self.note_type_first_field = ""
             return []
-        if fields[0] == settings.value("word_field"):
+
+        first_field = fields[0]
+        word_field_name = template.word_field
+        sentence_field_name = template.sentence_field
+
+        if first_field == word_field_name:
             logger.info(
-                f'First field is word field, trying to find a note with field "{fields[0]}" having value "{word}"')
-            find_query = f"\"{fields[0]}:{word}\""
+                f'First field is word field, trying to find a note with field "{first_field}" having value "{word}"')
+            find_query = f"\"{first_field}:{word}\""
             self.note_type_first_field = "word"
-        elif fields[0] == settings.value("sentence_field"):
+        elif sentence_field_name and first_field == sentence_field_name:
             logger.info(
-                f'First field is sentence field, trying to find a note with field "{fields[0]}" having value "{sentence}"')
-            find_query = f"\"{fields[0]}:{sentence}\""
+                f'First field is sentence field, trying to find a note with field "{first_field}" having value "{sentence}"')
+            find_query = f"\"{first_field}:{sentence}\""
             self.note_type_first_field = "sentence"
         else:
-            logger.error(f"First field is neither word field nor sentence field, skipping checking for duplicates")
+            logger.error(
+                "First field '%s' does not match template word '%s' or sentence '%s'. Skipping duplicate check.",
+                first_field,
+                word_field_name,
+                sentence_field_name,
+            )
             return []
         try:
             notes_found = findNotes(api, find_query)
@@ -982,7 +1003,7 @@ class MainWindow(MainWindowBase):
             definition2=self.definition2.toAnki(),
             audio_path=self.audio_selector.current_audio_path,
             image=self.image_path,
-            tags=settings.value("tags", "vocabsieve").strip().split() + self.tags.text().strip().split()
+            tags=list(get_current_template().tags) + self.tags.text().strip().split()
         )
 
         target_language = self.getLanguage()

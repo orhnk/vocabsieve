@@ -127,27 +127,61 @@ def ensure_deck_exists(server: str, deck_name: str) -> None:
     _existing_decks_cache.add(deck_name)
 
 
+def _merge_field_content(existing: str, new_value: str) -> str:
+    """Merge two snippets destined for the same Anki field."""
+    if not existing.strip():
+        return new_value
+    if not new_value.strip():
+        return existing
+
+    if new_value.strip() == existing.strip():
+        return existing
+
+    uses_html = any(token in existing.lower() for token in ("<br", "</", "<p", "<div")) or \
+        any(token in new_value.lower() for token in ("<br", "</", "<p", "<div"))
+
+    separator = "<br><br>" if uses_html else "\n\n"
+    if existing.endswith(separator):
+        return f"{existing}{new_value}"
+    return f"{existing}{separator}{new_value}"
+
+
 def prepareAnkiNoteDict(anki_settings: AnkiSettings, note: SRSNote, target_language: Optional[str] = None) -> dict:
     """
     Helper function to create a json to be sent to AnkiConnect
     """
     deck_name = get_deck_name_for_language(anki_settings, target_language)
+    fields: dict[str, str] = {}
+
+    def _assign(field_name: Optional[str], value: Optional[str]) -> None:
+        if not field_name:
+            return
+        cleaned_value = value or ""
+        if field_name in fields:
+            if not cleaned_value.strip():
+                return
+            fields[field_name] = _merge_field_content(fields[field_name], cleaned_value)
+            return
+        if not cleaned_value.strip():
+            return
+        fields[field_name] = cleaned_value
+
+    _assign(anki_settings.word_field, note.word)
+    _assign(anki_settings.sentence_field, note.sentence)
+    _assign(anki_settings.definition1_field, note.definition1)
+    _assign(anki_settings.definition2_field, note.definition2)
+
     content = {
         "deckName": deck_name if deck_name else anki_settings.deck,
         "modelName": anki_settings.model,
-        "fields": {
-            anki_settings.word_field: note.word or "",
-            anki_settings.sentence_field: note.sentence or "",
-            anki_settings.definition1_field: note.definition1 or "",
-            anki_settings.definition2_field: note.definition2 or ""
-        },
+        "fields": fields,
         "tags": []
     }
     if anki_settings.tags:
         content["tags"].extend(anki_settings.tags)  # type: ignore
     if note.tags:
         content["tags"].extend(note.tags)  # type: ignore
-    if note.audio_path:
+    if note.audio_path and anki_settings.audio_field:
         content["audio"] = [
             {  # type: ignore
                 #"filename": os.path.basename(note.audio_path),
@@ -163,7 +197,7 @@ def prepareAnkiNoteDict(anki_settings: AnkiSettings, note: SRSNote, target_langu
         else:
             content["audio"][0]["path"] = note.audio_path  # type: ignore
             content["audio"][0]["filename"] = os.path.basename(note.audio_path)  # type: ignore
-    if note.image:
+    if note.image and anki_settings.image_field:
         content["picture"] = [
             {  # type: ignore
                 "path": note.image,

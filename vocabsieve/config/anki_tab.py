@@ -6,30 +6,36 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QCheckBox,
     QLineEdit,
-    QInputDialog,
+    QHBoxLayout,
+    QWidget,
     QMessageBox,
+    QInputDialog,
 )
-from PyQt5.QtCore import pyqtSlot
+from contextlib import contextmanager
 from typing import Optional
 
-from ..anki_templates import (
-    AnkiTemplateSpec,
-    DEFAULT_TEMPLATE_NAME,
-    active_template_name,
-    apply_template,
-    apply_template_by_name,
-    delete_template,
-    initialize_templates,
-    load_templates,
-    upsert_template,
-)
 from ..tools import addDefaultModel, getDeckList, getNoteTypes, getFields, getVersion
 from ..global_names import settings, logger
+from ..anki_templates import (
+    ensure_templates_initialized,
+    list_templates,
+    get_current_template,
+    get_template,
+    update_template,
+    delete_template,
+    set_current_template_name,
+    duplicate_template,
+    AnkiTemplate,
+)
 
 
 class AnkiTab(BaseTab):
     def __init__(self):
-        user_note_type = settings.value("note_type")
+        ensure_templates_initialized()
+        self._loading_template = False
+        self.current_template: AnkiTemplate = get_current_template()
+        self._last_template_name: str = self.current_template.name
+        user_note_type = self.current_template.note_type
         super().__init__()
         if not user_note_type and not settings.value("internal/added_default_note_type"):
             try:
@@ -43,6 +49,13 @@ class AnkiTab(BaseTab):
         self.anki_api = QLineEdit()
         self.deck_name = QComboBox()
         self.tags = QLineEdit()
+        self.template_selector = QComboBox()
+        self.template_selector.setObjectName("templateSelector")
+        self.template_name_edit = QLineEdit()
+        self.template_name_edit.setPlaceholderText("Template name")
+        self.template_new_button = QPushButton("New template")
+        self.template_save_button = QPushButton("Save template")
+        self.template_delete_button = QPushButton("Delete template")
         self.note_type = QComboBox()
         self.sentence_field = QComboBox()
 
@@ -54,23 +67,16 @@ class AnkiTab(BaseTab):
         self.image_field = QComboBox()
         self.default_notetype_button = QPushButton(
             "Use default note type ('vocabsieve-notes', will be created if it does not exist)")
-        self.template_selector = QComboBox()
-        self.template_apply_button = QPushButton("Load template")
-        self.template_save_button = QPushButton("Save template")
-        self.template_save_as_button = QPushButton("Save as new template")
-        self.template_delete_button = QPushButton("Delete template")
 
     def setupWidgets(self):
         self.default_notetype_button.setToolTip(
             "This will use the default note type provided by VocabSieve. It will be created if it does not exist.")
         self.default_notetype_button.clicked.connect(self.onDefaultNoteType)
-        initialize_templates()
-        self.template_apply_button.clicked.connect(self.on_template_apply)
-        self.template_save_button.clicked.connect(self.on_template_save)
-        self.template_save_as_button.clicked.connect(self.on_template_save_as)
-        self.template_delete_button.clicked.connect(self.on_template_delete)
-        self.template_selector.currentTextChanged.connect(self.on_template_current_changed)
-        self.refresh_templates()
+        self.template_new_button.clicked.connect(self.on_template_new_clicked)
+        self.template_save_button.clicked.connect(self.on_template_save_clicked)
+        self.template_delete_button.clicked.connect(self.on_template_delete_clicked)
+        self.template_selector.currentIndexChanged.connect(self.on_template_selected)
+        self.refresh_template_selector()
 
     def loadDecks(self):
         logger.debug("Loading decks")
@@ -200,11 +206,16 @@ class AnkiTab(BaseTab):
         layout.addRow(QLabel('AnkiConnect API'), self.anki_api)
         layout.addRow(QLabel("Deck name"), self.deck_name)
         layout.addRow(QLabel('Default tags'), self.tags)
-        layout.addRow(QLabel("<hr>"))
-        layout.addRow(QLabel("Templates"))
-        layout.addRow(QLabel("Available templates"), self.template_selector)
-        layout.addRow(self.template_apply_button, self.template_save_button)
-        layout.addRow(self.template_save_as_button, self.template_delete_button)
+        layout.addRow(QLabel("<h4>Templates</h4>"))
+        layout.addRow(QLabel("Template"), self.template_selector)
+        layout.addRow(QLabel("Template name"), self.template_name_edit)
+        template_buttons = QWidget()
+        button_layout = QHBoxLayout(template_buttons)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.addWidget(self.template_new_button)
+        button_layout.addWidget(self.template_save_button)
+        button_layout.addWidget(self.template_delete_button)
+        layout.addRow(template_buttons)
         layout.addRow(QLabel("<hr>"))
         layout.addRow(self.default_notetype_button)
         layout.addRow(QLabel("Note type"), self.note_type)
@@ -242,6 +253,11 @@ class AnkiTab(BaseTab):
         self.definition2_field.setEnabled(value)
         self.pronunciation_field.setEnabled(value)
         self.image_field.setEnabled(value)
+        self.template_selector.setEnabled(value)
+        self.template_name_edit.setEnabled(value)
+        self.template_new_button.setEnabled(value)
+        self.template_save_button.setEnabled(value)
+        self.template_delete_button.setEnabled(value and self.template_selector.count() > 1)
         # TODO: Implement these in the tracking tab # pylint: disable=fixme
         #self.anki_query_mature.setEnabled(value)
         #self.anki_query_young.setEnabled(value)
@@ -284,134 +300,193 @@ class AnkiTab(BaseTab):
             self.register_config_handler(self.image_field, 'image_field', "<disabled>")
 
         self.note_type.currentTextChanged.connect(self.loadFields)
+        self.apply_template_to_controls(self.current_template)
 
-    def refresh_templates(self) -> None:
-        templates = load_templates()
-        active = active_template_name()
-        self.template_selector.blockSignals(True)
-        self.template_selector.clear()
-        for template in templates:
-            self.template_selector.addItem(template.name)
-        index = self.template_selector.findText(active)
-        if index >= 0:
-            self.template_selector.setCurrentIndex(index)
-        self.template_selector.blockSignals(False)
-        self.on_template_current_changed(self.template_selector.currentText())
+    @contextmanager
+    def _block_template_updates(self):
+        previous = self._loading_template
+        self._loading_template = True
+        try:
+            yield
+        finally:
+            self._loading_template = previous
 
-    def on_template_current_changed(self, name: str) -> None:
-        allow_edit = bool(name) and name != DEFAULT_TEMPLATE_NAME
-        self.template_save_button.setEnabled(allow_edit)
-        self.template_delete_button.setEnabled(allow_edit)
-        self.template_apply_button.setEnabled(bool(name))
+    def refresh_template_selector(self, select_name: Optional[str] = None) -> None:
+        templates = list_templates()
+        if not templates:
+            return
+        if select_name is None:
+            select_name = self.current_template.name if self.current_template else templates[0].name
+        matching = next((tpl for tpl in templates if tpl.name == select_name), templates[0])
+        with self._block_template_updates():
+            self.template_selector.blockSignals(True)
+            self.template_selector.clear()
+            for template in templates:
+                self.template_selector.addItem(template.name)
+            if self.template_selector.findText(matching.name) == -1:
+                self.template_selector.addItem(matching.name)
+            self.template_selector.setCurrentText(matching.name)
+            self.template_selector.blockSignals(False)
+            self.template_name_edit.setText(matching.name)
+        self.template_delete_button.setEnabled(len(templates) > 1 and self.template_save_button.isEnabled())
+        self.template_new_button.setEnabled(self.enable_anki.isChecked())
+        self.current_template = matching
+        self._last_template_name = matching.name
 
-    def on_template_apply(self) -> None:
-        name = self.template_selector.currentText()
+    def _set_combo_value(self, combo: QComboBox, value: str) -> None:
+        if value is None:
+            return
+        text = value.strip()
+        if text == "":
+            return
+        index = combo.findText(text)
+        if index == -1:
+            combo.addItem(text)
+            index = combo.findText(text)
+        combo.setCurrentIndex(index)
+
+    def _collect_template_from_controls(self, name: str) -> AnkiTemplate:
+        tags_text = self.tags.text().strip()
+        tags_list = [tag for tag in tags_text.split() if tag]
+        return AnkiTemplate(
+            name=name,
+            deck=self.deck_name.currentText().strip(),
+            note_type=self.note_type.currentText().strip(),
+            tags=tags_list,
+            word_field=self.word_field.currentText().strip(),
+            sentence_field=self.sentence_field.currentText().strip(),
+            definition1_field=self.definition1_field.currentText().strip(),
+            definition2_field=self.definition2_field.currentText().strip(),
+            audio_field=self.pronunciation_field.currentText().strip(),
+            image_field=self.image_field.currentText().strip(),
+            frequency_field=self.frequency_field.currentText().strip(),
+        )
+
+    def apply_template_to_controls(self, template: AnkiTemplate) -> None:
+        with self._block_template_updates():
+            self.template_name_edit.setText(template.name)
+            tags_text = " ".join(template.tags)
+            if self.tags.text() != tags_text:
+                self.tags.setText(tags_text)
+            note_changed = self.note_type.currentText() != template.note_type
+            self._set_combo_value(self.deck_name, template.deck)
+            self._set_combo_value(self.note_type, template.note_type)
+        if note_changed and self.enable_anki.isChecked():
+            try:
+                self.loadFields()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Unable to load Anki fields for template %s: %s", template.name, exc)
+        with self._block_template_updates():
+            self._set_combo_value(self.word_field, template.word_field)
+            self._set_combo_value(self.sentence_field, template.sentence_field)
+            self._set_combo_value(self.definition1_field, template.definition1_field)
+            self._set_combo_value(self.definition2_field, template.definition2_field)
+            self._set_combo_value(self.pronunciation_field, template.audio_field)
+            self._set_combo_value(self.image_field, template.image_field)
+            self._set_combo_value(self.frequency_field, template.frequency_field)
+        set_current_template_name(template.name)
+        self.current_template = template
+        self._last_template_name = template.name
+
+    def on_template_selected(self, index: int) -> None:
+        if self._loading_template:
+            return
+        if index < 0:
+            name = self.template_selector.currentText().strip()
+        else:
+            name = self.template_selector.itemText(index).strip()
         if not name:
             return
-        template = apply_template_by_name(name)
+        template = get_template(name)
         if template is None:
-            QMessageBox.warning(self, "Template missing", f"Template '{name}' is not available.")
-            self.refresh_templates()
             return
-        self.apply_template_to_widgets(template)
-        logger.info(f"Applied Anki template '{template.name}' from settings tab")
+        self.apply_template_to_controls(template)
+        self.refresh_template_selector(select_name=template.name)
 
-    def on_template_save(self) -> None:
-        name = self.template_selector.currentText()
+    def on_template_save_clicked(self) -> None:
+        name = self.template_name_edit.text().strip()
         if not name:
+            QMessageBox.warning(self, "Template name required", "Please enter a name before saving the template.")
             return
-        if name == DEFAULT_TEMPLATE_NAME:
-            QMessageBox.information(
+        existing = get_template(name)
+        if existing and name != self._last_template_name:
+            reply = QMessageBox.question(
                 self,
-                "Read-only template",
-                "The default template cannot be overwritten. Use 'Save as new template' instead.",
+                "Overwrite template?",
+                f'A template named "{name}" already exists. Overwrite it?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
             )
-            return
-        template = self.collect_current_template(name)
-        upsert_template(template)
-        if active_template_name() == name:
-            apply_template(template)
-        logger.info(f"Updated Anki template '{name}'")
-        self.refresh_templates()
+            if reply != QMessageBox.Yes:
+                return
+        template = self._collect_template_from_controls(name)
+        previous_name = None if name == self._last_template_name else self._last_template_name
+        update_template(template, previous_name=previous_name)
+        self.current_template = template
+        self._last_template_name = template.name
+        self.refresh_template_selector(select_name=template.name)
+        set_current_template_name(template.name)
 
-    def on_template_save_as(self) -> None:
-        name, accepted = QInputDialog.getText(self, "Save template", "Template name:")
-        if not accepted:
-            return
-        name = name.strip()
-        if not name:
-            QMessageBox.warning(self, "Invalid name", "Template name cannot be empty.")
-            return
-        template = self.collect_current_template(name)
-        upsert_template(template)
-        apply_template(template)
-        self.refresh_templates()
-        logger.info(f"Saved Anki template '{name}'")
+    def _suggest_new_template_name(self, base: str) -> str:
+        existing = {tpl.name for tpl in list_templates()}
+        seed = base.strip() or "Template"
+        if seed not in existing:
+            return seed
+        suffix = 1
+        while True:
+            candidate = f"{seed} ({suffix})"
+            if candidate not in existing:
+                return candidate
+            suffix += 1
 
-    def on_template_delete(self) -> None:
-        name = self.template_selector.currentText()
-        if not name:
-            return
-        if name == DEFAULT_TEMPLATE_NAME:
-            QMessageBox.information(
-                self,
-                "Read-only template",
-                "The default template cannot be deleted.",
-            )
-            return
-        confirm = QMessageBox.question(
+    def on_template_new_clicked(self) -> None:
+        current_name = self.template_selector.currentText().strip()
+        suggestion = self._suggest_new_template_name(f"{current_name} copy" if current_name else "Template")
+        name, ok = QInputDialog.getText(
             self,
-            "Delete template",
-            f"Are you sure you want to delete the template '{name}'?",
+            "Create new template",
+            "New template name:",
+            QLineEdit.Normal,
+            suggestion,
+        )
+        if not ok:
+            return
+        new_name = name.strip()
+        if not new_name:
+            QMessageBox.warning(self, "Template name required", "Please provide a name for the new template.")
+            return
+        if get_template(new_name) is not None:
+            QMessageBox.warning(
+                self,
+                "Template exists",
+                f'A template named "{new_name}" already exists. Please choose a different name.',
+            )
+            return
+        duplicated = duplicate_template(current_name, new_name) if current_name else None
+        if duplicated is None:
+            duplicated = self._collect_template_from_controls(new_name)
+            update_template(duplicated, previous_name=None)
+        self.current_template = duplicated
+        self._last_template_name = duplicated.name
+        self.refresh_template_selector(select_name=duplicated.name)
+        self.apply_template_to_controls(duplicated)
+
+    def on_template_delete_clicked(self) -> None:
+        if self.template_selector.count() <= 1:
+            QMessageBox.information(self, "Cannot delete", "At least one template must remain.")
+            return
+        name = self.template_selector.currentText().strip()
+        if not name:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete template?",
+            f'Are you sure you want to delete the template "{name}"?',
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
-        if confirm != QMessageBox.Yes:
+        if reply != QMessageBox.Yes:
             return
-        if delete_template(name):
-            logger.info(f"Deleted Anki template '{name}'")
-        else:
-            logger.warning(f"Could not delete Anki template '{name}'")
-        self.refresh_templates()
-
-    def collect_current_template(self, name: str) -> AnkiTemplateSpec:
-        return AnkiTemplateSpec(
-            name=name,
-            deck_name=self.deck_name.currentText(),
-            note_type=self.note_type.currentText(),
-            word_field=self.word_field.currentText(),
-            sentence_field=self.sentence_field.currentText(),
-            definition1_field=self.definition1_field.currentText(),
-            definition2_field=self.definition2_field.currentText(),
-            pronunciation_field=self.pronunciation_field.currentText(),
-            image_field=self.image_field.currentText(),
-            frequency_field=self.frequency_field.currentText(),
-            tags=self.tags.text().strip(),
-        )
-
-    def apply_template_to_widgets(self, template: AnkiTemplateSpec) -> None:
-        self._set_combo_value(self.deck_name, template.deck_name)
-        self._set_combo_value(self.note_type, template.note_type)
-        try:
-            self.loadFields()
-        except Exception as exc:  # pragma: no cover
-            logger.warning(f"Unable to refresh fields while applying template '{template.name}': {exc}")
-        self._set_combo_value(self.word_field, template.word_field)
-        self._set_combo_value(self.sentence_field, template.sentence_field)
-        self._set_combo_value(self.definition1_field, template.definition1_field)
-        self._set_combo_value(self.definition2_field, template.definition2_field)
-        self._set_combo_value(self.pronunciation_field, template.pronunciation_field)
-        self._set_combo_value(self.image_field, template.image_field)
-        self._set_combo_value(self.frequency_field, template.frequency_field)
-        self.tags.blockSignals(True)
-        self.tags.setText(template.tags)
-        self.tags.blockSignals(False)
-
-    def _set_combo_value(self, combo: QComboBox, value: Optional[str]) -> None:
-        if value is None:
-            value = ""
-        combo.blockSignals(True)
-        if value and combo.findText(value) == -1:
-            combo.addItem(value)
-        combo.setCurrentText(value)
-        combo.blockSignals(False)
+        next_template = delete_template(name)
+        self.refresh_template_selector(select_name=next_template.name)
+        self.apply_template_to_controls(next_template)

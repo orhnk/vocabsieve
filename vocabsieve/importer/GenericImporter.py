@@ -7,6 +7,7 @@ from ..ui.main_window_base import MainWindowBase
 from .models import ReadingNote
 from ..models import SRSNote
 from ..tools import prepareAnkiNoteDict, addNotes, remove_punctuations, canAddNotes, ensure_deck_exists
+from ..anki_templates import get_current_template
 
 import re
 import os
@@ -202,9 +203,7 @@ class GenericImporter(QDialog):
                     # First item
                     audio_path = audios[next(iter(audios))]
 
-            tags = []
-            if settings.value("tags", "vocabsieve").strip():
-                tags.extend(settings.value("tags", "vocabsieve").strip().split())
+            tags = list(get_current_template().tags)
             tags.append(self.methodname)
             tags.append(note.book_name.replace(" ", "_"))
 

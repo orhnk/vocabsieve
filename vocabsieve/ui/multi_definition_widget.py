@@ -124,6 +124,8 @@ class MultiDefinitionWidget(SearchableTextEdit):
 
         self.threads = []
         self.workers = []
+        self._worker_threads: dict[int, QThread] = {}
+        self._thread_workers: dict[int, LookupWorker] = {}
         self._source_results = {}
         self._pending_source_names = set()
 
@@ -173,15 +175,15 @@ class MultiDefinitionWidget(SearchableTextEdit):
         if source.INTERNET:
             lookup_thread = QThread()
             lookup_worker = LookupWorker(source, word, no_lemma, rules)
-            lookup_worker._thread = lookup_thread  # type: ignore[attr-defined]
-            lookup_thread._worker = lookup_worker  # type: ignore[attr-defined]
             lookup_worker.moveToThread(lookup_thread)
+            self._worker_threads[id(lookup_worker)] = lookup_thread
+            self._thread_workers[id(lookup_thread)] = lookup_worker
             lookup_thread.started.connect(lookup_worker.run)
             lookup_worker.got_definitions.connect(self.appendDefinition)
             lookup_worker.finished.connect(lookup_thread.quit)
             lookup_worker.finished.connect(lookup_worker.deleteLater)
             lookup_thread.finished.connect(lookup_thread.deleteLater)
-            lookup_thread.finished.connect(lambda thr=lookup_thread, worker=lookup_worker: self._cleanup_thread(thr, worker))
+            lookup_thread.finished.connect(lambda thr=lookup_thread: self._cleanup_thread(thr))
             lookup_thread.start()
 
             # Keep references to avoid garbage collection, otherwise this crashes
@@ -191,21 +193,20 @@ class MultiDefinitionWidget(SearchableTextEdit):
         else:  # Local source, no thread
             self.appendDefinition(source.name, source.define(word, no_lemma=no_lemma))
 
-    def _cleanup_thread(self, thread: QThread | None, worker: LookupWorker | None) -> None:
-        if thread in self.threads:
+    def _cleanup_thread(self, thread: QThread | None) -> None:
+        if thread is None:
+            return
+        worker = self._thread_workers.pop(id(thread), None)
+        if worker is not None:
+            self._worker_threads.pop(id(worker), None)
+            try:
+                self.workers.remove(worker)
+            except ValueError:
+                pass
+        try:
             self.threads.remove(thread)
-        if worker in self.workers:
-            self.workers.remove(worker)
-        if thread is not None and hasattr(thread, "_worker"):
-            try:
-                delattr(thread, "_worker")
-            except AttributeError:
-                pass
-        if worker is not None and hasattr(worker, "_thread"):
-            try:
-                delattr(worker, "_thread")
-            except AttributeError:
-                pass
+        except ValueError:
+            pass
 
     @pyqtSlot(str, object)
     def appendDefinition(self, source_name: str, definitions_obj):
@@ -345,6 +346,8 @@ class MultiDefinitionWidget(SearchableTextEdit):
         self._source_results = {}
         self._pending_source_names = set()
         # TODO try to remove references to threads and workers without crashing # pylint: disable=fixme
+        self._worker_threads.clear()
+        self._thread_workers.clear()
 
     def getSource(self, source_name: str) -> Optional[DictionarySource]:
         for source in self.sources:
@@ -362,7 +365,7 @@ class MultiDefinitionWidget(SearchableTextEdit):
                 worker.got_definitions.disconnect(self.appendDefinition)
             except (TypeError, RuntimeError):
                 pass
-            thread = getattr(worker, "_thread", None)
+            thread = self._worker_threads.get(id(worker))
             if isinstance(thread, QThread):
                 thread.requestInterruption()
         for thread in active_threads:
@@ -372,17 +375,19 @@ class MultiDefinitionWidget(SearchableTextEdit):
                 logger.warning("Lookup thread did not exit in time; terminating")
                 thread.terminate()
                 thread.wait()
-            worker = getattr(thread, "_worker", None)
+            worker = self._thread_workers.get(id(thread))
             if isinstance(worker, LookupWorker):
-                self._cleanup_thread(thread, worker)
+                self._cleanup_thread(thread)
                 try:
                     worker.deleteLater()
                 except RuntimeError:
                     pass
+            else:
+                self._cleanup_thread(thread)
         self.threads = [thread for thread in self.threads if thread.isRunning()]
         pruned_workers = []
         for worker in self.workers:
-            thread = getattr(worker, "_thread", None)
+            thread = self._worker_threads.get(id(worker))
             if isinstance(thread, QThread) and thread.isRunning():
                 pruned_workers.append(worker)
         self.workers = pruned_workers

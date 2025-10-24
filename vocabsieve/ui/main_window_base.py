@@ -1,5 +1,5 @@
 from PyQt5.QtWidgets import QMainWindow, QWidget, QGridLayout, QLabel, QPushButton, QCheckBox, \
-    QStatusBar, QMenuBar, QMenu, \
+    QStatusBar, QMenuBar, \
     QSizePolicy, QApplication, QLineEdit, QComboBox
 from PyQt5.QtGui import QDesktopServices, QKeyEvent
 from PyQt5.QtCore import QUrl, pyqtSignal, Qt, QObject, QEvent
@@ -8,7 +8,17 @@ from .audio_selector import AudioSelector
 from .multi_definition_widget import MultiDefinitionWidget
 from .word_record_display import WordRecordDisplay
 
+from typing import Optional
+
 from ..global_names import app_title, settings, datapath, MOD, logger
+from ..anki_templates import (
+    ensure_templates_initialized,
+    list_templates,
+    get_current_template_name,
+    set_current_template_name,
+    get_current_template,
+    normalize_field_name,
+)
 from ..constants import langcodes
 
 from ..record import Record
@@ -19,15 +29,6 @@ from .freq_display_widget import FreqDisplayWidget
 from .about import AboutDialog
 from .logview import LogView
 from ..models import AnkiSettings, WordActionWeights, KeyAction
-
-from ..anki_templates import (
-    active_template_name,
-    apply_template_by_name,
-    initialize_templates,
-    load_templates,
-)
-
-from functools import partial
 
 import platform
 import os
@@ -41,10 +42,10 @@ from sentence_splitter import SentenceSplitter, SentenceSplitterException
 class MainWindowBase(QMainWindow):
     audio_fetched = pyqtSignal(dict)
     target_language_changed = pyqtSignal(str)
+    template_changed = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
-        initialize_templates()
         self.setWindowTitle(app_title(True))
         self.setFocusPolicy(Qt.StrongFocus)
         self.widget = QWidget()
@@ -68,6 +69,9 @@ class MainWindowBase(QMainWindow):
         self.prev_clipboard = ""
         self.image_path = ""
         self.is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
+
+        ensure_templates_initialized()
+        self._updating_template_combo = False
 
         self.scaleFont()
         self.initWidgets()
@@ -108,10 +112,16 @@ class MainWindowBase(QMainWindow):
         #self.sentence.setMaximumHeight(300)
         self.word = QLineEdit()
         self.word.setPlaceholderText("Word")
+        self.template_combo = QComboBox()
+        self.template_combo.setObjectName("templateCombo")
+        self.template_combo.setToolTip("Select the Anki template to use when creating cards.")
+        self.template_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.target_language_combo = QComboBox()
         self.target_language_combo.setObjectName("targetLanguageCombo")
         self._populateTargetLanguageCombo()
         self.syncTargetLanguageCombo(apply=False)
+        self.syncTemplateCombo(apply=False)
+        self.template_combo.currentIndexChanged.connect(self._onTemplateIndexChanged)
         self.target_language_combo.currentIndexChanged.connect(self._onTargetLanguageIndexChanged)
         self.definition = MultiDefinitionWidget(self.word)
         self.definition.setMinimumHeight(70)
@@ -129,13 +139,6 @@ class MainWindowBase(QMainWindow):
         self.toanki_button = QPushButton(f"Add note [{MOD}+S]")
         self.view_last_note_button = QPushButton("View last note")
         self.view_last_note_button.setToolTip(f"View the last added note. [{MOD}+Shift+F]")
-        self.template_button = QPushButton()
-        self.template_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.template_button.setToolTip("Select an Anki card template")
-        self.template_menu = QMenu(self.template_button)
-        self.template_menu.aboutToShow.connect(self._populate_template_menu)
-        self.template_button.setMenu(self.template_menu)
-        self._update_template_button_label()
 
         self.read_button = QPushButton("Read clipboard")
         self.read_button.setToolTip(
@@ -211,7 +214,8 @@ class MainWindowBase(QMainWindow):
         layout.addWidget(self.read_button, 4, 0)
         layout.addWidget(self.web_button, 4, 1)
         layout.addWidget(self.image_viewer, 0, 2, 6, 1)
-        layout.addWidget(self.target_language_combo, 5, 0, 1, 2)
+        layout.addWidget(self.template_combo, 5, 0)
+        layout.addWidget(self.target_language_combo, 5, 1)
         layout.addWidget(self.sentence, 6, 0, 1, 3)
         layout.setRowStretch(6, 1)
 
@@ -234,53 +238,33 @@ class MainWindowBase(QMainWindow):
         layout.addWidget(self.tags, 16, 0, 1, 3)
 
         layout.addWidget(self.view_last_note_button, 17, 0)
-        layout.addWidget(self.template_button, 17, 1)
-        layout.addWidget(self.toanki_button, 17, 2)
+        layout.addWidget(self.toanki_button, 17, 1, 1, 2)
 
         layout.setColumnStretch(0, 2)
         layout.setColumnStretch(1, 2)
         layout.setColumnStretch(2, 5)
         self._layout = layout
-
-    def _populate_template_menu(self) -> None:
-        self.template_menu.clear()
-        initialize_templates()
-        templates = load_templates()
-        if not templates:
-            placeholder = self.template_menu.addAction("No templates available")
-            placeholder.setEnabled(False)
-            return
-        current = active_template_name()
-        for template in templates:
-            action = self.template_menu.addAction(template.name)
-            action.setCheckable(True)
-            action.setChecked(template.name == current)
-            action.triggered.connect(partial(self._on_template_selected, template.name))
-
-    def _on_template_selected(self, template_name: str) -> None:
-        template = apply_template_by_name(template_name)
-        if template is None:
-            self.status(f"Template '{template_name}' is not available")
-            return
-        self._update_template_button_label()
-        self.status(f"Template set to '{template.name}'")
-
-    def _update_template_button_label(self) -> None:
-        if not hasattr(self, "template_button"):
-            return
-        name = active_template_name() or "Default"
-        if len(name) > 24:
-            name_display = name[:21] + "..."
-        else:
-            name_display = name
-        self.template_button.setText(f"Template: {name_display}")
-        self.template_button.setToolTip(f"Select an Anki card template (current: {name})")
+        self._configure_tab_order()
 
     def _populateTargetLanguageCombo(self) -> None:
         self.target_language_combo.clear()
         options = sorted(langs_supported.items(), key=lambda item: item[1].lower())
         for code, name in options:
             self.target_language_combo.addItem(name, code)
+
+    def _populateTemplateCombo(self) -> None:
+        templates = list_templates()
+        current_name = get_current_template_name()
+        self.template_combo.blockSignals(True)
+        self.template_combo.clear()
+        for template in templates:
+            self.template_combo.addItem(template.name)
+        index = self.template_combo.findText(current_name)
+        if index < 0 and self.template_combo.count() > 0:
+            index = 0
+        if index >= 0:
+            self.template_combo.setCurrentIndex(index)
+        self.template_combo.blockSignals(False)
 
     def syncTargetLanguageCombo(self, apply: bool = False) -> None:
         lang_code = settings.value("target_language", "en") or "en"
@@ -298,6 +282,20 @@ class MainWindowBase(QMainWindow):
         if apply:
             self._setTargetLanguage(lang_code, persist=False)
 
+    def syncTemplateCombo(self, apply: bool = False) -> None:
+        self._updating_template_combo = True
+        try:
+            self._populateTemplateCombo()
+            index = self.template_combo.currentIndex()
+            if index < 0 and self.template_combo.count() > 0:
+                index = 0
+            if apply and index >= 0:
+                name = self.template_combo.itemText(index)
+                if name:
+                    self._apply_template_selection(name)
+        finally:
+            self._updating_template_combo = False
+
     def _onTargetLanguageIndexChanged(self, index: int) -> None:
         if self._updating_target_language_combo or index < 0:
             return
@@ -305,6 +303,17 @@ class MainWindowBase(QMainWindow):
         if not code:
             return
         self._setTargetLanguage(str(code), persist=True)
+
+    def _onTemplateIndexChanged(self, index: int) -> None:
+        if self._updating_template_combo or index < 0:
+            return
+        name = self.template_combo.itemText(index)
+        if name:
+            self._apply_template_selection(name)
+
+    def _apply_template_selection(self, name: str) -> None:
+        set_current_template_name(name)
+        self.template_changed.emit(name)
 
     def _setTargetLanguage(self, code: str, *, persist: bool, force: bool = False) -> None:
         if not code:
@@ -331,6 +340,36 @@ class MainWindowBase(QMainWindow):
             self.initSources()
         self.target_language_changed.emit(final_code)
 
+    def _configure_tab_order(self) -> None:
+        widgets = [
+            self.single_word,
+            self.lookup_definition_on_doubleclick,
+            self.lookup_definition_when_hovering,
+            self.read_button,
+            self.web_button,
+            self.template_combo,
+            self.target_language_combo,
+            self.sentence,
+        ]
+        if settings.value("sg2_enabled", False, type=bool):
+            widgets.extend([self.definition, self.definition2])
+        else:
+            widgets.append(self.definition)
+        widgets.extend([
+            self.audio_selector,
+            self.freq_widget,
+            self.word,
+            self.tags,
+            self.view_last_note_button,
+            self.toanki_button,
+        ])
+        focusable = [
+            widget for widget in widgets
+            if widget is not None and widget.focusPolicy() != Qt.NoFocus
+        ]
+        for first, second in zip(focusable, focusable[1:]):
+            self.setTabOrder(first, second)
+
     def _apply_sentence_splitter(self, code: str) -> str:
         try:
             self.splitter = SentenceSplitter(language=code)
@@ -356,15 +395,20 @@ class MainWindowBase(QMainWindow):
         self.logview.exec_()
 
     def getAnkiSettings(self) -> AnkiSettings:
+        template = get_current_template()
+
+        tags = list(template.tags)
+
         return AnkiSettings(
-            deck=settings.value("deck_name", "Default"),
-            model=settings.value("note_type", "vocabsieve-notes"),
-            word_field=settings.value("word_field", "Word"),
-            sentence_field=settings.value("sentence_field", "Sentence"),
-            definition1_field=settings.value("definition1_field", "Definition"),
-            definition2_field=settings.value("definition2_field"),
-            audio_field=settings.value("pronunciation_field"),
-            image_field=settings.value("image_field"),
+            deck=template.deck,
+            model=template.note_type,
+            word_field=template.word_field,
+            sentence_field=template.sentence_field or "",
+            definition1_field=template.definition1_field or "",
+            definition2_field=normalize_field_name(template.definition2_field),
+            audio_field=normalize_field_name(template.audio_field),
+            image_field=normalize_field_name(template.image_field),
+            tags=tags or None,
         )
 
     def getWordActionWeights(self) -> WordActionWeights:

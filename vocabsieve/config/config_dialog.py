@@ -124,3 +124,5 @@ class ConfigDialog(QDialog):
             self._parent._layout.removeWidget(self._parent.definition2)
             self._parent.definition2.setVisible(False)
             self._parent._layout.addWidget(self._parent.definition, 8, 0, 4, 3)
+        if hasattr(self._parent, "_configure_tab_order"):
+            self._parent._configure_tab_order()
