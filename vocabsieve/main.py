@@ -671,6 +671,38 @@ class MainWindow(MainWindowBase):
         self.shortcut_clearimage.activated.connect(lambda: self.setImage(None))
         self.shortcut_clearaudio = QShortcut(QKeySequence('Ctrl+Shift+X'), self)
         self.shortcut_clearaudio.activated.connect(self.audio_selector.discard_audio_button.animateClick)
+        self.shortcut_next_definition = QShortcut(QKeySequence('Ctrl+Tab'), self)
+        self.shortcut_next_definition.activated.connect(self._show_next_definition)
+        self.shortcut_previous_definition = QShortcut(QKeySequence('Ctrl+Shift+Tab'), self)
+        self.shortcut_previous_definition.activated.connect(self._show_previous_definition)
+
+    def _definition_widgets_for_navigation(self):
+        widgets = [self.definition]
+        if settings.value("sg2_enabled", False, type=bool):
+            widgets.append(self.definition2)
+        return widgets
+
+    def _navigate_definitions(self, direction: int) -> None:
+        widgets = self._definition_widgets_for_navigation()
+        if not widgets:
+            return
+        target = next((widget for widget in widgets if widget.hasFocus()), None)
+        if target is None:
+            target = next((widget for widget in widgets if getattr(widget, "definitions", [])), None)
+        if target is None:
+            target = widgets[0]
+        if not getattr(target, "definitions", []):
+            return
+        if direction > 0:
+            target.forward()
+        elif direction < 0:
+            target.back()
+
+    def _show_next_definition(self) -> None:
+        self._navigate_definitions(1)
+
+    def _show_previous_definition(self) -> None:
+        self._navigate_definitions(-1)
 
     def onWebButton(self) -> None:
         """Shows definitions of self.word.text() in wiktionoary in browser"""
