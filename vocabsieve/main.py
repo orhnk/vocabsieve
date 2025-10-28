@@ -891,8 +891,33 @@ class MainWindow(MainWindowBase):
         self.previous_word = target
         self.previous_trigger = trigger
 
-    def setSentence(self, content) -> None:
-        self.sentence.setText(str.strip(content))
+    def setSentence(self, content, *, record_history: bool = True) -> None:
+        normalized = str(content).strip() if content is not None else ""
+        history = getattr(self, "_sentence_history", None)
+        current_text = self.sentence.toPlainText()
+
+        if normalized == current_text:
+            if history is not None:
+                history.replace_current(current_text)
+                if record_history:
+                    self._announce_sentence_history()
+            return
+
+        if history is not None and record_history:
+            history.checkpoint(current_text)
+        self._suppress_sentence_history_sync = True
+        try:
+            self.sentence.setText(normalized)
+        finally:
+            self._suppress_sentence_history_sync = False
+
+        updated_text = self.sentence.toPlainText()
+        if history is not None:
+            if record_history:
+                history.checkpoint(updated_text)
+                self._announce_sentence_history()
+            else:
+                history.replace_current(updated_text)
 
     def setWord(self, content) -> None:
         self.word.setText(content)
@@ -1053,7 +1078,7 @@ class MainWindow(MainWindowBase):
             self.status("Added note to Anki")
             # Clear fields
             self.setImage(None)
-            self.sentence.setText("")
+            self.setSentence("")
             self.word.setText("")
             self.definition.reset()
             self.definition2.reset()

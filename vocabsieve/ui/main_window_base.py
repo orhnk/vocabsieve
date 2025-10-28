@@ -7,8 +7,9 @@ from .audio_selector import AudioSelector
 
 from .multi_definition_widget import MultiDefinitionWidget
 from .word_record_display import WordRecordDisplay
+from .sentence_history import SentenceHistory
 
-from typing import Optional
+from typing import Optional, cast
 
 from ..global_names import app_title, settings, datapath, MOD, logger
 from ..anki_templates import (
@@ -78,6 +79,11 @@ class MainWindowBase(QMainWindow):
         self.resize(int(550 / self.devicePixelRatioF()), int(900 / self.devicePixelRatioF()))
         self.setupWidgetsV()
 
+        self._sentence_history = SentenceHistory(self.sentence.toPlainText())
+        self._suppress_sentence_history_sync = False
+        self.sentence.textChanged.connect(self._on_sentence_text_changed)
+        self.sentence.installEventFilter(self)
+
         # Setup Key monitoring to monitor the shit key
 
         self.shift_pressed: bool = False
@@ -100,6 +106,65 @@ class MainWindowBase(QMainWindow):
             int(font.pointSize() * settings.value("text_scale", type=int) / 100))
         QApplication.setFont(font)
         self.setFont(font)
+
+    def eventFilter(self, source: QObject, event: QEvent) -> bool:
+        if source is self.sentence and event.type() == QEvent.KeyPress:
+            key_event = cast(QKeyEvent, event)
+            if key_event.modifiers() & Qt.ControlModifier:
+                if key_event.key() == Qt.Key.Key_H:
+                    if not self._sentence_history_step(-1):
+                        self._announce_sentence_history_limit(-1)
+                    return True
+                if key_event.key() == Qt.Key.Key_L:
+                    if not self._sentence_history_step(1):
+                        self._announce_sentence_history_limit(1)
+                    return True
+        return super().eventFilter(source, event)
+
+    def _sentence_history_step(self, delta: int) -> bool:
+        history = getattr(self, "_sentence_history", None)
+        if history is None or not history.can_step(delta):
+            return False
+        next_text = history.step(delta)
+        if next_text is None:
+            return False
+        self._apply_sentence_history_text(next_text)
+        self._announce_sentence_history()
+        return True
+
+    def _apply_sentence_history_text(self, value: str) -> None:
+        history = getattr(self, "_sentence_history", None)
+        self._suppress_sentence_history_sync = True
+        try:
+            self.sentence.setText(value or "")
+        finally:
+            self._suppress_sentence_history_sync = False
+        if history is not None:
+            history.replace_current(self.sentence.toPlainText())
+
+    def _on_sentence_text_changed(self) -> None:
+        if getattr(self, "_suppress_sentence_history_sync", False):
+            return
+        history = getattr(self, "_sentence_history", None)
+        if history is None:
+            return
+        history.replace_current(self.sentence.toPlainText())
+
+    def _announce_sentence_history(self) -> None:
+        history = getattr(self, "_sentence_history", None)
+        announcer = getattr(self, "status", None)
+        if history is None or not callable(announcer):
+            return
+        index, total = history.position()
+        announcer(f"Sentence history {index}/{total}")
+
+    def _announce_sentence_history_limit(self, direction: int) -> None:
+        history = getattr(self, "_sentence_history", None)
+        announcer = getattr(self, "status", None)
+        if history is None or not callable(announcer):
+            return
+        message = "Sentence history: already at oldest" if direction < 0 else "Sentence history: already at newest"
+        announcer(message)
 
     def initWidgets(self) -> None:
         self.namelabel = QLabel(
@@ -244,7 +309,7 @@ class MainWindowBase(QMainWindow):
         layout.setColumnStretch(1, 2)
         layout.setColumnStretch(2, 5)
         self._layout = layout
-        self._configure_tab_order()
+        self._configure_tab_order(settings.value("sg2_enabled", False, type=bool))
 
     def _populateTargetLanguageCombo(self) -> None:
         self.target_language_combo.clear()
@@ -340,7 +405,11 @@ class MainWindowBase(QMainWindow):
             self.initSources()
         self.target_language_changed.emit(final_code)
 
-    def _configure_tab_order(self) -> None:
+    def _configure_tab_order(self, sg2_enabled: Optional[bool] = None) -> None:
+        if sg2_enabled is None:
+            sg2_enabled = self.definition2.isVisible()
+        sg2_enabled = bool(sg2_enabled)
+        initial_boot_pending = not settings.value("internal/initial_sentence_focus_done", False, type=bool)
         widgets = [
             self.single_word,
             self.lookup_definition_on_doubleclick,
@@ -351,7 +420,9 @@ class MainWindowBase(QMainWindow):
             self.target_language_combo,
             self.sentence,
         ]
-        if settings.value("sg2_enabled", False, type=bool):
+        if initial_boot_pending:
+            widgets = [self.sentence] + [widget for widget in widgets if widget is not self.sentence]
+        if sg2_enabled:
             widgets.extend([self.definition, self.definition2])
         else:
             widgets.append(self.definition)
@@ -369,6 +440,10 @@ class MainWindowBase(QMainWindow):
         ]
         for first, second in zip(focusable, focusable[1:]):
             self.setTabOrder(first, second)
+        if initial_boot_pending:
+            self.sentence.setFocus()
+            settings.setValue("internal/initial_sentence_focus_done", True)
+            settings.sync()
 
     def _apply_sentence_splitter(self, code: str) -> str:
         try:
