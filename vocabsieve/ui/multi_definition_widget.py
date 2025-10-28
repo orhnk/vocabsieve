@@ -57,22 +57,28 @@ class ButtonsBoxWidget(QWidget):
 
 
 class LookupWorker(QObject):
-    got_definitions = pyqtSignal(str, object)
-    finished = pyqtSignal()
+    # emit token, source_name, definitions
+    got_definitions = pyqtSignal(int, str, object)
+    finished = pyqtSignal(int)
 
-    def __init__(self, source: DictionarySource, word: str, no_lemma: bool, rules: list[tuple[str, str]]):
+    def __init__(self, source: DictionarySource, word: str, no_lemma: bool, rules: list[tuple[str, str]], token: int = 0):
         super().__init__()
         self.source = source
         self.word = word
         self.no_lemma = no_lemma
         self.rules = rules
+        self.token = token
 
     def run(self):
         start = time.time()
         if QThread.currentThread().isInterruptionRequested():
-            self.finished.emit()
+            self.finished.emit(self.token)
             return
-        definitions = self.source.define(self.word, no_lemma=self.no_lemma)
+        try:
+            definitions = self.source.define(self.word, no_lemma=self.no_lemma)
+        except Exception as exc:  # Protect the UI thread from exceptions in sources
+            logger.exception(f"LookupWorker: exception while looking up {self.word} in {self.source.name}: {exc}")
+            definitions = []
         any_definitions = any(defi.definition is not None for defi in definitions)
         if not any_definitions and self.rules:
             logger.info(f"No definitions found for {self.word} in {self.source.name}, applying word rules")
@@ -81,18 +87,50 @@ class LookupWorker(QObject):
                 no_lemma=self.no_lemma
             )
         if QThread.currentThread().isInterruptionRequested():
-            self.finished.emit()
+            self.finished.emit(self.token)
             return
-        self.got_definitions.emit(self.source.name, definitions)
-        logger.debug(f"LookupWorker: looked up {self.word} in {self.source.name} in {time.time()-start:.2f} seconds")
-        self.finished.emit()
+        self.got_definitions.emit(self.token, self.source.name, definitions)
+        logger.debug(f"LookupWorker: looked up {self.word} in {self.source.name} in {time.time()-start:.2f} seconds (token {self.token})")
+        self.finished.emit(self.token)
+
+
+class LocalLookupWorker(QObject):
+    """Worker that performs local source lookups sequentially in a dedicated thread.
+
+    Using a single worker avoids concurrent access to native/disk-backed local
+    dictionary resources that may not be thread-safe and can cause crashes.
+    """
+    # emit token, source_name, definitions
+    got_definitions = pyqtSignal(int, str, object)
+
+    def __init__(self):
+        super().__init__()
+
+    @pyqtSlot(int, object, str, bool, object)
+    def do_lookup(self, token, source, word, no_lemma, rules):
+        try:
+            definitions = source.define(word, no_lemma=no_lemma)
+        except Exception as exc:
+            logger.exception(f"LocalLookupWorker: exception while looking up {word} in {getattr(source, 'name', '?')}: {exc}")
+            definitions = []
+        any_definitions = any(getattr(d, 'definition', None) is not None for d in definitions)
+        if not any_definitions and rules:
+            try:
+                alt = apply_word_rules(word, rules)
+                definitions = source.define(alt, no_lemma=no_lemma)
+            except Exception:
+                pass
+        self.got_definitions.emit(token, getattr(source, 'name', ''), definitions)
 
 
 class MultiDefinitionWidget(SearchableTextEdit):
     nextDefinitionScrollTransitionCounter = 0
+    _local_lookup_signal = pyqtSignal(int, object, str, bool, object)
 
     def __init__(self, word_widget: Optional[QLineEdit] = None):
         super().__init__()
+        # token increments on each lookup; used to ignore stale results
+        self._lookup_token = 0
         self.sources: list[DictionarySource] = []
         self._active_sources: list[DictionarySource] = []
         self.word_widget = word_widget
@@ -128,6 +166,14 @@ class MultiDefinitionWidget(SearchableTextEdit):
         self._thread_workers: dict[int, LookupWorker] = {}
         self._source_results = {}
         self._pending_source_names = set()
+        # Dedicated single-thread worker for local (disk/native) sources
+        self._local_thread = QThread()
+        self._local_worker = LocalLookupWorker()
+        self._local_worker.moveToThread(self._local_thread)
+        # connect signal to perform lookups on the local worker in its thread
+        self._local_lookup_signal.connect(self._local_worker.do_lookup)
+        self._local_worker.got_definitions.connect(self.appendDefinition)
+        self._local_thread.start()
 
     def wheelEvent(self, event):
         if len(self.sources) > 1:
@@ -167,31 +213,43 @@ class MultiDefinitionWidget(SearchableTextEdit):
         self._source_results = {}
         if self._active_sources:
             self.setPlaceholderText(f"Looking up \"{word}\"...")
+        # bump token so previous results are ignored
+        self._lookup_token += 1
+        token = self._lookup_token
         for source in self._active_sources:
-            self._lookup_in_source(source, word, no_lemma=no_lemma, rules=rules)
+            self._lookup_in_source(source, word, no_lemma=no_lemma, rules=rules, token=token)
 
     def _lookup_in_source(self, source: DictionarySource, word: str,
-                          no_lemma: bool, rules: list[tuple[str, str]]) -> None:
+                          no_lemma: bool, rules: list[tuple[str, str]], token: int = 0) -> None:
+        # Run internet sources in their own threads to parallelize network I/O.
+        # Run local sources via the dedicated local worker to avoid concurrent
+        # access to potentially non-thread-safe native/disk-backed resources.
         if source.INTERNET:
             lookup_thread = QThread()
-            lookup_worker = LookupWorker(source, word, no_lemma, rules)
+            lookup_worker = LookupWorker(source, word, no_lemma, rules, token=token)
             lookup_worker.moveToThread(lookup_thread)
+            # maintain mappings for cleanup
             self._worker_threads[id(lookup_worker)] = lookup_thread
             self._thread_workers[id(lookup_thread)] = lookup_worker
             lookup_thread.started.connect(lookup_worker.run)
             lookup_worker.got_definitions.connect(self.appendDefinition)
-            lookup_worker.finished.connect(lookup_thread.quit)
-            lookup_worker.finished.connect(lookup_worker.deleteLater)
+            # finished now carries token; quit/delete via lambdas so extra arg is ignored
+            lookup_worker.finished.connect(lambda t, thr=lookup_thread: thr.quit())
+            lookup_worker.finished.connect(lambda t, w=lookup_worker: w.deleteLater())
             lookup_thread.finished.connect(lookup_thread.deleteLater)
             lookup_thread.finished.connect(lambda thr=lookup_thread: self._cleanup_thread(thr))
             lookup_thread.start()
 
-            # Keep references to avoid garbage collection, otherwise this crashes
+            # Keep references to avoid garbage collection
             self.threads.append(lookup_thread)
             self.workers.append(lookup_worker)
-
-        else:  # Local source, no thread
-            self.appendDefinition(source.name, source.define(word, no_lemma=no_lemma))
+        else:
+            # delegate to the single-threaded local worker via a queued signal
+            try:
+                self._local_lookup_signal.emit(token, source, word, no_lemma, rules)
+            except Exception:
+                # Fallback: run inline if signalling fails
+                self.appendDefinition(source.name, source.define(word, no_lemma=no_lemma))
 
     def _cleanup_thread(self, thread: QThread | None) -> None:
         if thread is None:
@@ -207,9 +265,14 @@ class MultiDefinitionWidget(SearchableTextEdit):
             self.threads.remove(thread)
         except ValueError:
             pass
+        # If local thread is stopping as part of cleanup, make sure to keep it running until explicit close
 
-    @pyqtSlot(str, object)
-    def appendDefinition(self, source_name: str, definitions_obj):
+    @pyqtSlot(int, str, object)
+    def appendDefinition(self, token: int, source_name: str, definitions_obj):
+        # Ignore results from previous lookups
+        if token != getattr(self, '_lookup_token', 0):
+            logger.debug(f"Ignoring stale definition result for token {token} (current {getattr(self, '_lookup_token', 0)})")
+            return
         if isinstance(definitions_obj, list):
             definitions = list(definitions_obj)
         elif definitions_obj is None:
@@ -367,23 +430,27 @@ class MultiDefinitionWidget(SearchableTextEdit):
                 pass
             thread = self._worker_threads.get(id(worker))
             if isinstance(thread, QThread):
+                # request interruption but do not block waiting for thread exit
                 thread.requestInterruption()
+                try:
+                    thread.quit()
+                except Exception:
+                    pass
         for thread in active_threads:
-            thread.requestInterruption()
-            thread.quit()
-            if not thread.wait(5000):
-                logger.warning("Lookup thread did not exit in time; terminating")
-                thread.terminate()
-                thread.wait()
+            # request interruption and request thread to quit; non-blocking
+            try:
+                thread.requestInterruption()
+                thread.quit()
+            except Exception:
+                pass
             worker = self._thread_workers.get(id(thread))
             if isinstance(worker, LookupWorker):
-                self._cleanup_thread(thread)
                 try:
-                    worker.deleteLater()
-                except RuntimeError:
+                    worker.got_definitions.disconnect(self.appendDefinition)
+                except Exception:
                     pass
-            else:
-                self._cleanup_thread(thread)
+                # schedule deletion when thread finishes (thread.finished handlers will cleanup)
+            self._cleanup_thread(thread)
         self.threads = [thread for thread in self.threads if thread.isRunning()]
         pruned_workers = []
         for worker in self.workers:
@@ -391,6 +458,17 @@ class MultiDefinitionWidget(SearchableTextEdit):
             if isinstance(thread, QThread) and thread.isRunning():
                 pruned_workers.append(worker)
         self.workers = pruned_workers
+        # Stop local worker thread if present
+        try:
+            if hasattr(self, '_local_thread') and isinstance(self._local_thread, QThread):
+                if self._local_thread.isRunning():
+                    # request non-blocking quit for local worker thread
+                    try:
+                        self._local_thread.quit()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         self._stop_all_threads()

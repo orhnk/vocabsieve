@@ -74,6 +74,14 @@
             
             substituteInPlace $out/share/applications/vocabsieve.desktop \
               --replace "Exec=vocabsieve" "Exec=$out/bin/vocabsieve"
+            # Ensure any newly added UI modules are packaged into site-packages
+            # (helps when local, uncommitted files need to be present in the built
+            #  derivation used by `nix run`). Copy sentence_history into the
+            #  installed package folder if it exists in the source tree.
+            mkdir -p $out/lib/python3.12/site-packages/vocabsieve/ui || true
+            if [ -e "$src/vocabsieve/ui/sentence_history.py" ]; then
+              cp "$src/vocabsieve/ui/sentence_history.py" $out/lib/python3.12/site-packages/vocabsieve/ui/ || true
+            fi
           '';
 
           preFixup = ''
