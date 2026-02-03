@@ -173,6 +173,7 @@ class GenericImporter(QDialog):
         self.anki_notes: list[SRSNote] = []
         self.book_names: list[str] = []
         self.lastDate = "1970-01-01 00:00:00"
+        seen_words: set[str] = set()
         defi1 = self._parent.definition
         defi2 = self._parent.definition2
         definition2_enabled = settings.value("sg2_enabled", False, type=bool)
@@ -188,6 +189,10 @@ class GenericImporter(QDialog):
             self.lastDate = max(note.date, self.lastDate)
             # Remove punctuations
             word = remove_punctuations(note.lookup_term)
+            word_key = word
+            if word_key in seen_words:
+                continue
+            seen_words.add(word_key)
             if settings.value("bold_word", True, type=bool):
                 sentence = note.sentence.replace(word, f"<strong>{word}</strong>")
             else:
