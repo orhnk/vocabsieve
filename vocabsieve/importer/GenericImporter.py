@@ -133,12 +133,28 @@ class GenericImporter(QDialog):
                     logger.debug(f"Selected book: {checkbox.text()}")
                     selected_book_names.append(checkbox.text())
             self.selected_reading_notes = self.filterHighlights(start_date, selected_book_names)
+            self._persist_selected_books()
         else:
             self.selected_reading_notes = self.reading_notes
         self.progressbar.setMaximum(len(self.selected_reading_notes))
 
         self.progressbar.setValue(0)
         self.notes_count_label.setText(f"{len(self.selected_reading_notes)} highlights selected")
+
+    def _persist_selected_books(self) -> None:
+        if self.methodname in ('auto', 'wordlist'):
+            return
+        if not hasattr(self, "src_checkboxes"):
+            return
+        try:
+            with open(self.last_import_books_file, "w", encoding='utf-8') as file:
+                json.dump([cb.text() for cb in self.src_checkboxes if cb.isChecked()], file)
+        except Exception as e:
+            logger.warning(f"Failed to persist selected books: {repr(e)}")
+
+    def closeEvent(self, event):
+        self._persist_selected_books()
+        super().closeEvent(event)
 
     def filterHighlights(self, start_date, book_names) -> list[ReadingNote]:
         new_reading_notes = []

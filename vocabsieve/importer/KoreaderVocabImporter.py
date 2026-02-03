@@ -48,14 +48,19 @@ class KoreaderVocabImporter(GenericImporter):
     def getNotes(self):
         bookfiles = koreader_scandir(self.book_paths)
         langcode = settings.value("target_language", "en")
+        filter_by_language = settings.value("koreader_filter_by_language", True, type=bool)
         metadata = []
         for bookfile in bookfiles:
             metadata.append(getBookMetadata(bookfile))
 
-        books_in_lang = [book[1] for book in metadata if book[0].startswith(langcode)]
-        logger.debug(f"Books in language {langcode}: {books_in_lang}")
-        logger.debug(
-            f"Other books have been skipped. They are {', '.join([book[1] for book in metadata if not book[0].startswith(langcode)])}")
+        if filter_by_language:
+            books_in_lang = [book[1] for book in metadata if book[0].startswith(langcode)]
+            logger.debug(f"Books in language {langcode}: {books_in_lang}")
+            logger.debug(
+                f"Other books have been skipped. They are {', '.join([book[1] for book in metadata if not book[0].startswith(langcode)])}")
+        else:
+            books_in_lang = [book[1] for book in metadata]
+            logger.debug("KOReader language filter disabled; importing all books.")
         search_paths = [self.path] + self.settings_paths + self.book_paths
         self.dbpath = findDBpath(search_paths)
         logger.debug("KOReader vocab db path: " + self.dbpath)
@@ -129,7 +134,14 @@ class KoreaderVocabImporter(GenericImporter):
             self._layout.addRow(
                 QLabel("Failed to find/read lookup_history.lua. Lookups will not be tracked this time."))
         else:
-            entries = [entry['data'].get(next(iter(entry['data']))) for entry in d]
+            entries = []
+            for entry in d:
+                if not isinstance(entry, dict):
+                    continue
+                data = entry.get('data')
+                if not isinstance(data, dict) or not data:
+                    continue
+                entries.append(data.get(next(iter(data))))
             entries = [entry for entry in entries if entry]
             entries = [(entry.get('word'), entry.get('book_title', ''), entry.get('time')) for entry in entries]
             count = 0

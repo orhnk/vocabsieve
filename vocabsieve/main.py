@@ -665,7 +665,23 @@ class MainWindow(MainWindowBase):
             return
         try:
             book_paths = [path]
+            try:
+                saved_settings_paths = json.loads(settings.value("koreader_settings_paths", "[]"))
+            except Exception:
+                saved_settings_paths = []
+            try:
+                saved_book_paths = json.loads(settings.value("koreader_books_paths", "[]"))
+            except Exception:
+                saved_book_paths = []
+
+            for saved in saved_book_paths:
+                if saved and saved not in book_paths:
+                    book_paths.append(saved)
+
             settings_paths = find_koreader_settings_dirs([path])
+            if not settings_paths and saved_settings_paths:
+                settings_paths = saved_settings_paths
+
             if not settings_paths:
                 reply = QMessageBox.question(
                     self,
@@ -681,6 +697,8 @@ class MainWindow(MainWindowBase):
                     )
                     if settings_path:
                         settings_paths = find_koreader_settings_dirs([settings_path]) or [settings_path]
+            if settings_paths:
+                settings.setValue("koreader_settings_paths", json.dumps(settings_paths))
             reply = QMessageBox.question(
                 self,
                 "Add books directory?",
@@ -695,12 +713,21 @@ class MainWindow(MainWindowBase):
                 )
                 if books_path:
                     book_paths.append(books_path)
+            if book_paths:
+                settings.setValue("koreader_books_paths", json.dumps(book_paths))
             if len(koreader_scandir(book_paths)) == 0:
                 QMessageBox.warning(
                     self,
                     "No KOReader books found",
                     "No KOReader books were found under the selected directories. You can still proceed, but only books with valid KOReader metadata will be imported."
                 )
+            reply = QMessageBox.question(
+                self,
+                "Filter by target language?",
+                "Only import KOReader books matching your target language?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            settings.setValue("koreader_filter_by_language", reply == QMessageBox.Yes)
             KoreaderVocabImporter(self, path, book_paths=book_paths, settings_paths=settings_paths).exec()
         except ValueError:
             QMessageBox.warning(

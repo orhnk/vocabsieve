@@ -37,6 +37,13 @@ def find_koreader_settings_dirs(path):
             if os.path.exists(candidate):
                 settings_dirs.append(candidate)
 
+    # Directly search for known files and add their parent folders
+    for root in roots:
+        for file_path in glob.glob(os.path.join(root, "**/lookup_history.lua"), recursive=True):
+            settings_dirs.append(os.path.dirname(file_path))
+        for file_path in glob.glob(os.path.join(root, "**/vocabulary_builder.sqlite3"), recursive=True):
+            settings_dirs.append(os.path.dirname(file_path))
+
     # Fallback: search for settings directories that contain known files
     if not settings_dirs:
         for root in roots:
