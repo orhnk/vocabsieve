@@ -117,7 +117,41 @@
             python312Packages.wheel
             qt5.wrapQtAppsHook
             qt5.qtbase
-          ];
+            qt5.qtx11extras
+            qt5.qtmultimedia
+           ] ++ [
+             pkgs.wl-clipboard
+           ] ++ (with pkgs.python312Packages; [
+            lxml
+            pyqt5
+            pyqt5-multimedia
+            requests
+            beautifulsoup4
+            bidict
+            flask
+            charset-normalizer
+            ebooklib
+            pysubs2
+            markdownify
+            markdown
+            loguru
+            packaging
+            typing-extensions
+            waitress
+            pyqtgraph
+            simplemma
+            pystardict
+            slpp
+            mobi
+            sentence-splitter
+            pymorphy3
+            python-lzo
+            readmdict
+             pyqtdarktheme
+             pytest
+             pytest-xdist
+             pytest-cov
+          ]);
         };
       });
 }

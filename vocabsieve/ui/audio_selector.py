@@ -60,14 +60,20 @@ class AudioSelector(QListWidget):
     def lookup(self, word: str):
         # check if all sources are online
         if self.sg is not None:
-            all_online = all(not source.INTERNET for source in self.sg.sources)
-            if all_online:
-                # Use threads only if all online because sqlite cursor
-                # can't be accessed from multiple threads
+            # If any source is an internet source, we should run lookup on a
+            # background thread to avoid blocking the UI with network IO. If
+            # all sources are local (e.g., sqlite-backed), run inline to avoid
+            # concurrent sqlite access from multiple threads.
+            all_local = all(not source.INTERNET for source in self.sg.sources)
+            if not all_local:
+                # At least one internet source exists: run lookup on a thread.
                 threading.Thread(
                     target=self.lookup_on_thread,
-                    args=(word,)).start()
+                    args=(word,),
+                    daemon=True,
+                ).start()
             else:
+                # All local sources: run inline (avoid thread-based sqlite calls)
                 self.lookup_on_thread(word)
 
     def play_audio_if_exists(self, x):

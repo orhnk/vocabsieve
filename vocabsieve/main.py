@@ -5,6 +5,8 @@ import os
 import sys
 import time
 import re
+import shutil
+import subprocess
 from datetime import datetime
 from typing import Optional, cast
 import requests
@@ -28,6 +30,7 @@ from .stats import StatisticsWindow
 from .dictionary import preprocess_clipboard
 from .local_dictionary import dictdb
 from .importer import KindleVocabImporter, KoreaderVocabImporter, AutoTextImporter, WordListImporter
+from .importer.utils import koreader_scandir, find_koreader_settings_dirs
 from .reader import ReaderServer
 from .contentmanager import ContentManager
 from .tools import (
@@ -98,6 +101,13 @@ class MainWindow(MainWindowBase):
     def onApplicationStateChanged(self, state):
         if state == Qt.ApplicationActive:
             self.last_got_focus = time.time()
+            # Wayland often blocks reading clipboard while unfocused.
+            # When we regain focus, do a best-effort clipboard read so the
+            # last copied text is processed immediately.
+            try:
+                self.clipboardChanged(even_when_focused=True)
+            except Exception:
+                pass
 
     def onTemplateChanged(self, name: str) -> None:
         self.note_type_first_field = ""
@@ -120,6 +130,49 @@ class MainWindow(MainWindowBase):
             self.initPollingClipboard()
             self.polled_clipboard_changed.connect(self.clipboardChanged)
             self.polled_selection_changed.connect(lambda: self.clipboardChanged(selection=True))
+            # Wayland workaround (Hyprland etc.): run an external watcher that can
+            # read clipboard/primary while we're unfocused, then forward it back to
+            # the app over localhost.
+            self._maybe_start_external_clipboard_watcher()
+
+    def _maybe_start_external_clipboard_watcher(self) -> None:
+        if os.environ.get("XDG_SESSION_TYPE") != "wayland":
+            return
+        if settings.value("reader_enabled", True, type=bool) is not True:
+            # Reuse the existing reader server for the localhost endpoint.
+            return
+
+        # Avoid starting multiple times
+        if getattr(self, "_clipboard_watcher_proc", None) is not None:
+            return
+
+        if shutil.which("wl-paste") is None:
+            logger.info("wl-paste not found; external clipboard watcher disabled")
+            return
+
+        try:
+            host = settings.value("reader_host", "127.0.0.1")
+            port = settings.value("reader_port", 39285, type=int)
+            url = f"http://{host}:{port}/api/clipboard"
+            # Launch via the same python interpreter so this works in venv/nix.
+            self._clipboard_watcher_proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "vocabsieve.clipboard_watch",
+                    "--host",
+                    str(host),
+                    "--port",
+                    str(port),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            logger.info(
+                f"Started external Wayland clipboard watcher pid={self._clipboard_watcher_proc.pid} -> {url}"
+            )
+        except Exception as e:
+            logger.debug(f"Failed to start external clipboard watcher: {e}")
 
     def initPollingClipboard(self):
         self.last_clipboard: str = QApplication.clipboard().text()
@@ -129,11 +182,16 @@ class MainWindow(MainWindowBase):
         self.last_image: Optional[QImage] = None
         clipboard_timer = QTimer(self)
         clipboard_timer.timeout.connect(self.pollClipboard)
-        clipboard_timer.start(50)
+        # Polling too frequently wastes CPU. 50ms is aggressive and can cause
+        # performance issues; 250ms is responsive while much cheaper.
+        clipboard_timer.start(250)
 
     def pollClipboard(self):
         if self.pause_polling:
             return
+        # On Wayland, clipboard content can be unavailable while the app is
+        # unfocused due to compositor security rules. If we can't read
+        # anything useful, just wait for the next poll.
         mimedata = QApplication.clipboard().mimeData()
         if mimedata.hasImage():
             if self.last_image is None or self.last_image != QApplication.clipboard().image():
@@ -606,12 +664,49 @@ class MainWindow(MainWindowBase):
         if not path:
             return
         try:
-            KoreaderVocabImporter(self, path).exec()
+            book_paths = [path]
+            settings_paths = find_koreader_settings_dirs([path])
+            if not settings_paths:
+                reply = QMessageBox.question(
+                    self,
+                    "Select KOReader settings directory?",
+                    "KOReader settings were not found under the selected directory. Select the settings folder now?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    settings_path = QFileDialog.getExistingDirectory(
+                        parent=self,
+                        caption="Select KOReader settings directory (contains lookup_history.lua)",
+                        directory=QStandardPaths.writableLocation(QStandardPaths.HomeLocation)
+                    )
+                    if settings_path:
+                        settings_paths = find_koreader_settings_dirs([settings_path]) or [settings_path]
+            reply = QMessageBox.question(
+                self,
+                "Add books directory?",
+                "If your books are on an SD card or another folder, select it now.",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                books_path = QFileDialog.getExistingDirectory(
+                    parent=self,
+                    caption="Select a directory containing your KOReader books (e.g., SD card)",
+                    directory=QStandardPaths.writableLocation(QStandardPaths.HomeLocation)
+                )
+                if books_path:
+                    book_paths.append(books_path)
+            if len(koreader_scandir(book_paths)) == 0:
+                QMessageBox.warning(
+                    self,
+                    "No KOReader books found",
+                    "No KOReader books were found under the selected directories. You can still proceed, but only books with valid KOReader metadata will be imported."
+                )
+            KoreaderVocabImporter(self, path, book_paths=book_paths, settings_paths=settings_paths).exec()
         except ValueError:
             QMessageBox.warning(
                 self,
                 "No notes are found",
-                "Check if you've picked the right directory. It should be a folder containing both all of your books and KOReader settings.")
+                "Check if you've picked the right directory. It should contain KOReader settings; if your books are on an SD card, select that folder when prompted.")
         except Exception as e:
             QMessageBox.warning(self, "Something went wrong", "Error: " + repr(e))
 
@@ -857,13 +952,19 @@ class MainWindow(MainWindowBase):
             self.boldWordInSentence(target)
         langcode = settings.value("target_language", "en")
         lemma = lem_word(target, langcode)
-        self.rec.recordLookup(
-            LookupRecord(
-                word=target,
-                language=self.getLanguage(),
-                source="vocabsieve"
-            )
-        )
+        # Record lookup asynchronously to avoid blocking the main UI thread
+        import threading
+
+        threading.Thread(
+            target=lambda: self.rec.recordLookup(
+                LookupRecord(
+                    word=target,
+                    language=self.getLanguage(),
+                    source="vocabsieve"
+                )
+            ),
+            daemon=True,
+        ).start()
         if self.known_data:
             word_record = self.known_data.get(
                 lemma,
@@ -964,33 +1065,45 @@ class MainWindow(MainWindowBase):
 
         should_convert_to_uppercase = self.getConvertToUppercase()
         lang = settings.value("target_language", "en")
-        # Check if any of the text box widgets are focused
-        # If they are, ignore the clipboard change
-        is_focused = (time.time() - self.last_got_focus > 0.2)\
-            and (self.sentence.hasFocus()
-                 or self.word.hasFocus()
-                 or self.definition.hasFocus()
-                 or self.definition2.hasFocus())\
-            or self.hasFocus()
-        # Allow pasting right after focus for wayland users
-        # because wayland doesn't allow pasting from inactive windows
-
-        if is_focused and not even_when_focused:
-            return
+        # Check if any of the text box widgets are focused.
+        # If they are, ignore the clipboard change unless explicitly
+        # requested (e.g., the Read clipboard button). We also allow a
+        # short grace period right after the application gains focus to
+        # support Wayland, which prevents pasting from inactive windows.
+        now = time.time()
+        recent_focus_gain = (now - self.last_got_focus) < 0.3
+        any_widget_has_focus = (
+            self.sentence.hasFocus()
+            or self.word.hasFocus()
+            or self.definition.hasFocus()
+            or self.definition2.hasFocus()
+        )
+        # Only suppress clipboard-triggered updates when the user is actively
+        # interacting with the app (focused + editing UI). When the app is not
+        # focused, we *do* want clipboard monitoring to continue.
+        app_focused = self.hasFocus()
+        if app_focused and any_widget_has_focus and not even_when_focused:
+            # allow a short grace period after focus gain (Wayland paste)
+            if not recent_focus_gain:
+                return
+        # Preprocess clipboard text once to avoid repeated work
+        processed = None
         if is_json(text):
             copyobj = json.loads(text)
             target = copyobj['word']
             target = re.sub('[\\?\\.!«»…()\\[\\]]*', "", target)
-            sentence = preprocess_clipboard(copyobj['sentence'], lang, should_convert_to_uppercase)
-            self.setSentence(sentence)
+            processed = preprocess_clipboard(copyobj.get('sentence', ''), lang, should_convert_to_uppercase)
+            self.setSentence(processed)
             self.setWord(target)
             self.lookup(target)
-        elif self.single_word.isChecked() and is_oneword(preprocess_clipboard(text, lang, should_convert_to_uppercase)):
-            self.setSentence(word := preprocess_clipboard(text, lang, should_convert_to_uppercase))
-            self.setWord(word)
-            self.lookup(text)
         else:
-            self.setSentence(preprocess_clipboard(text, lang, should_convert_to_uppercase))
+            processed = preprocess_clipboard(text, lang, should_convert_to_uppercase)
+            if self.single_word.isChecked() and is_oneword(processed):
+                self.setSentence(word := processed)
+                self.setWord(word)
+                self.lookup(text)
+            else:
+                self.setSentence(processed)
 
     def discard_current_audio(self):
         self.audio_selector.clear()

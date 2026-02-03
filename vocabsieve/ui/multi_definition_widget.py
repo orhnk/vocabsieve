@@ -1,12 +1,13 @@
 from PyQt5.QtGui import QWheelEvent
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QHBoxLayout
-from PyQt5.QtCore import Qt, pyqtSignal, QThread, QObject, pyqtSlot
+from PyQt5.QtCore import Qt, pyqtSignal, QThread, QObject, pyqtSlot, QTimer
 
 from .searchable_text_edit import SearchableTextEdit
 from ..models import Definition, DisplayMode, DictionarySource
 from ..tools import process_defi_anki, apply_word_rules
 from loguru import logger
 from typing import Optional
+import concurrent.futures
 import time
 from ..global_names import MOD
 
@@ -174,6 +175,12 @@ class MultiDefinitionWidget(SearchableTextEdit):
         self._local_lookup_signal.connect(self._local_worker.do_lookup)
         self._local_worker.got_definitions.connect(self.appendDefinition)
         self._local_thread.start()
+        # Thread pool for internet lookups to avoid creating many short-lived
+        # QThreads, which is expensive. Use a modest number of workers.
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=6)
+        # Simple in-memory cache for recent lookups: maps query -> {source_name: definitions}
+        # This allows instant display for repeated lookups and then refreshes in background.
+        self._cache = {}
 
     def wheelEvent(self, event):
         if len(self.sources) > 1:
@@ -211,6 +218,15 @@ class MultiDefinitionWidget(SearchableTextEdit):
         logger.debug(f"Looking up {word} in {self._active_sources}")
         self._pending_source_names = {source.name for source in self._active_sources}
         self._source_results = {}
+        # If we have cached results for this query, show them immediately
+        cached = self._cache.get(word)
+        if cached:
+            # shallow copy cached results into _source_results so UI can use them
+            self._source_results = {k: list(v) for k, v in cached.items()}
+            # determine which sources still need fresh results
+            self._pending_source_names = {s.name for s in self._active_sources} - set(self._source_results.keys())
+            # populate with cached results (may be final if nothing pending)
+            self.populateDefinitions(final=(not self._pending_source_names))
         if self._active_sources:
             self.setPlaceholderText(f"Looking up \"{word}\"...")
         # bump token so previous results are ignored
@@ -225,31 +241,35 @@ class MultiDefinitionWidget(SearchableTextEdit):
         # Run local sources via the dedicated local worker to avoid concurrent
         # access to potentially non-thread-safe native/disk-backed resources.
         if source.INTERNET:
-            lookup_thread = QThread()
-            lookup_worker = LookupWorker(source, word, no_lemma, rules, token=token)
-            lookup_worker.moveToThread(lookup_thread)
-            # maintain mappings for cleanup
-            self._worker_threads[id(lookup_worker)] = lookup_thread
-            self._thread_workers[id(lookup_thread)] = lookup_worker
-            lookup_thread.started.connect(lookup_worker.run)
-            lookup_worker.got_definitions.connect(self.appendDefinition)
-            # finished now carries token; quit/delete via lambdas so extra arg is ignored
-            lookup_worker.finished.connect(lambda t, thr=lookup_thread: thr.quit())
-            lookup_worker.finished.connect(lambda t, w=lookup_worker: w.deleteLater())
-            lookup_thread.finished.connect(lookup_thread.deleteLater)
-            lookup_thread.finished.connect(lambda thr=lookup_thread: self._cleanup_thread(thr))
-            lookup_thread.start()
+            # Submit internet-based lookup to shared thread pool. When the
+            # future completes, schedule appendDefinition to run on the Qt
+            # main thread via QTimer.singleShot(0,...).
+            def task():
+                try:
+                    definitions = source.define(word, no_lemma=no_lemma)
+                except Exception as exc:
+                    logger.exception(f"Executor lookup: exception while looking up {word} in {getattr(source,'name','?')}: {exc}")
+                    definitions = []
+                return definitions
 
-            # Keep references to avoid garbage collection
-            self.threads.append(lookup_thread)
-            self.workers.append(lookup_worker)
+            future = self._executor.submit(task)
+
+            def _on_done(fut, src_name=source.name, tok=token):
+                try:
+                    definitions = fut.result()
+                except Exception:
+                    definitions = []
+                # schedule appendDefinition on the main thread
+                QTimer.singleShot(0, lambda: self.appendDefinition(tok, src_name, definitions))
+
+            future.add_done_callback(_on_done)
         else:
             # delegate to the single-threaded local worker via a queued signal
             try:
                 self._local_lookup_signal.emit(token, source, word, no_lemma, rules)
             except Exception:
                 # Fallback: run inline if signalling fails
-                self.appendDefinition(source.name, source.define(word, no_lemma=no_lemma))
+                self.appendDefinition(token, source.name, source.define(word, no_lemma=no_lemma))
 
     def _cleanup_thread(self, thread: QThread | None) -> None:
         if thread is None:
@@ -287,6 +307,13 @@ class MultiDefinitionWidget(SearchableTextEdit):
         self._source_results[source_name] = definitions
         self._pending_source_names.discard(source_name)
         is_final = not self._pending_source_names
+        # If final results for a token, update cache for this target
+        if is_final and getattr(self, 'current_target', None):
+            try:
+                # store shallow copy of the dict to avoid mutation races
+                self._cache[self.current_target] = {k: list(v) for k, v in self._source_results.items()}
+            except Exception:
+                pass
         self.populateDefinitions(final=is_final)
 
     def populateDefinitions(self, final: bool = False):
@@ -467,6 +494,12 @@ class MultiDefinitionWidget(SearchableTextEdit):
                         self._local_thread.quit()
                     except Exception:
                         pass
+        except Exception:
+            pass
+        # Shutdown executor used for internet lookups
+        try:
+            if hasattr(self, '_executor'):
+                self._executor.shutdown(wait=False)
         except Exception:
             pass
 

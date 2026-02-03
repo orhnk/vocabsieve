@@ -50,6 +50,13 @@ app_name = _get_settings_app_title()
 qdarktheme.enable_hi_dpi()
 QCoreApplication.setApplicationName(app_name)
 QCoreApplication.setOrganizationName(app_organization)
+# Tests (and some CI environments) are headless. Qt can abort if no platform
+# plugin is available. In this repo's nix environment, the "offscreen" plugin
+# is typically not present, but Wayland plugins are. When we're under pytest and
+# the user didn't choose a platform, default to "wayland".
+if ("PYTEST_CURRENT_TEST" in os.environ or "PYTEST_VERSION" in os.environ) and "QT_QPA_PLATFORM" not in os.environ:
+    os.environ["QT_QPA_PLATFORM"] = "wayland"
+
 app = QApplication(sys.argv)
 settings = QSettings(app_organization, app_name)
 datapath = QStandardPaths.writableLocation(QStandardPaths.DataLocation)

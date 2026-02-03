@@ -4,9 +4,11 @@ from waitress import serve
 from requests import get
 import os
 import re
+from loguru import logger
 from ..global_names import settings
 from .utils import getEpubMetadata
-from PyQt5.QtCore import QCoreApplication, QObject
+from PyQt5.QtCore import QCoreApplication, QObject, QTimer
+import threading
 DEBUGGING = None
 if os.environ.get("VOCABSIEVE_DEBUG"):
     DEBUGGING = True
@@ -28,6 +30,9 @@ class ReaderServer(QObject):
 
     def start_api(self):
         """ Main server application """
+
+        # NOTE: Flask routes are registered when the server thread starts.
+        # We keep them inside this method so they can reference `self`.
 
         @app.route("/home")
         @app.route("/")
@@ -64,4 +69,73 @@ class ReaderServer(QObject):
                 return "No books directory set"
             return send_from_directory(books_dir, path)
 
-        serve(app, host=self.host, port=self.port)
+        @app.route('/api/clipboard', methods=['POST'])
+        def api_clipboard():
+            """Accept clipboard/primary-selection text forwarded from an external watcher.
+
+            This is primarily a Wayland workaround: compositors may prevent unfocused
+            applications from reading clipboard content directly. Tools like `wl-paste`
+            run in the user's session and can read the selection/clipboard reliably.
+
+            Expected JSON:
+              {"text": "...", "selection": false}
+            """
+            # Basic hardening: only accept loopback connections.
+            # (waitress sets REMOTE_ADDR)
+            if request.remote_addr not in ("127.0.0.1", "::1"):
+                return ("forbidden", 403)
+
+            payload = request.get_json(silent=True) or {}
+            text = payload.get("text", "")
+            selection = bool(payload.get("selection", False))
+            if not isinstance(text, str) or not text.strip():
+                return ("", 204)
+
+            logger.debug(
+                f"/api/clipboard received ({'primary' if selection else 'clipboard'}) len={len(text)}"
+            )
+
+            # Marshal to Qt main thread; don't touch widgets from the server thread.
+            def _deliver():
+                try:
+                    # Reuse existing behavior where possible.
+                    # We set the clipboard contents then trigger the same handler.
+                    # If Wayland blocks reads when unfocused, this still works because
+                    # the value is already inside the Qt clipboard for our process.
+                    from PyQt5.QtWidgets import QApplication
+                    from PyQt5.QtGui import QClipboard
+
+                    if selection and QApplication.clipboard().supportsSelection():
+                        QApplication.clipboard().setText(text, QClipboard.Selection)
+                        self.parent.clipboardChanged(even_when_focused=True, selection=True)
+                    else:
+                        QApplication.clipboard().setText(text)
+                        self.parent.clipboardChanged(even_when_focused=True)
+                except Exception:
+                    # Avoid taking down the web reader server on UI errors.
+                    pass
+
+            try:
+                # QTimer.singleShot(0, ...) is thread-safe in Qt and executes on the
+                # thread that owns this QObject (the UI thread in our app).
+                QTimer.singleShot(0, _deliver)
+            except Exception:
+                _deliver()
+
+            return ("ok", 200)
+
+        # `waitress.serve(...)` blocks, so we must run it off the UI thread.
+        # This method may be invoked from a QThread or directly from the UI
+        # (depending on platform/packaging), so we always move the actual serve
+        # call to a daemon thread.
+        def _serve():
+            serve(app, host=self.host, port=self.port)
+
+        t = threading.Thread(
+            target=_serve,
+            name=f"vocabsieve-reader-server:{self.host}:{self.port}",
+            daemon=True,
+        )
+        t.start()
+
+

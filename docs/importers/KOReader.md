@@ -27,8 +27,9 @@ When reading, you can look up unknown words. There should be a button that says 
 VocabSieve will import your lookup history automatically to its database for statistics purposes. It is recommended that you make sure the device time on your ereader does not drift too much from the actual time.
 
 1. Select the "Import KOReader" from the dropdown menus. 
-2. Navigate to the root directory of your ereader, such that it contains both all the books you want to import and KOReader's settings folder. 
-3. A window should show, which you can use to select which notes to add to Anki and preview cards by selecting the books you want to import and the date range.
+2. Navigate to the root directory of your ereader, such that it contains KOReader's settings folder. 
+3. If your books are stored on an SD card or another folder, VocabSieve will prompt you to select that directory.
+4. A window should show, which you can use to select which notes to add to Anki and preview cards by selecting the books you want to import and the date range.
 
 ## Troubleshooting
 ### Can't find my books
